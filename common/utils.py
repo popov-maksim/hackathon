@@ -16,8 +16,8 @@ def normalize_pred(obj) -> List[Dict]:
                 spans = obj.get("spans") or []
                 out = []
                 for it in spans:
-                    if isinstance(it, dict) and {"start","end","label"}.issubset(it.keys()):
-                        out.append({"start": int(it["start"]), "end": int(it["end"]), "label": str(it["label"])})
+                    if isinstance(it, dict) and {"start_index","end_index","entity"}.issubset(it.keys()):
+                        out.append({"start": int(it["start_index"]), "end": int(it["end_index"]), "label": str(it["entity"])})
                 return out
             if "annotation" in obj:
                 ann = obj.get("annotation")
@@ -32,8 +32,8 @@ def normalize_pred(obj) -> List[Dict]:
         if isinstance(obj, list):
             out = []
             for it in obj:
-                if isinstance(it, dict) and {"start","end","label"}.issubset(it.keys()):
-                    out.append({"start": int(it["start"]), "end": int(it["end"]), "label": str(it["label"])})
+                if isinstance(it, dict) and {"start_index","end_index","entity"}.issubset(it.keys()):
+                    out.append({"start": int(it["start_index"]), "end": int(it["end_index"]), "label": str(it["entity"])})
                 elif isinstance(it, (list, tuple)) and len(it) == 3:
                     out.append({"start": int(it[0]), "end": int(it[1]), "label": str(it[2])})
             return out

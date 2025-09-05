@@ -2,6 +2,7 @@ import os
 import csv
 import time
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import httpx
@@ -25,6 +26,10 @@ from common.utils import f1_macro, parse_annotation_literal, normalize_pred
 
 celery_app = Celery("tasks", broker=REDIS_URL)
 celery_app.conf.task_routes = {"tasks.*": {"queue": "runs"}}
+
+
+logger = logging.getLogger("worker.tasks")
+logger.setLevel(logging.INFO)
 
 
 def _db_url() -> str:
@@ -54,6 +59,8 @@ async def run(run_id: int):
 
             team = (await db.execute(select(Team).where(Team.id == run.team_id))).scalar_one()
             phase = (await db.execute(select(Phase).where(Phase.id == run.phase_id))).scalar_one()
+
+            logger.info(f"Starting run {run_id} for team {team.name} in phase {phase.name}")
 
             run.status = RunStatus.RUNNING
             run.started_at = datetime.now(timezone.utc)
@@ -91,11 +98,17 @@ async def run(run_id: int):
                         try:
                             resp = await client.post(url, json=payload)
                             latency_ms = (time.perf_counter() - t0) * 1000.0
+                            logger.info(f"Latency: {latency_ms} ms")
+                            logger.info(f"Response: {resp.status_code}")
                             if resp.status_code == 200:
                                 data = resp.json()
                                 pred_json = normalize_pred(data)
                                 ok = True
-                        except Exception:
+                            else:
+                                body_preview = resp.text[:100].replace("\n", " ")
+                                logger.warning(f"Request failed with status {body_preview}")
+                        except Exception as e:
+                            logger.info(f"Error: {e}")
                             pass
 
                         samples_total += 1

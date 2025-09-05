@@ -1,7 +1,19 @@
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, Text, JSON, BigInteger, Enum
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Boolean,
+    ForeignKey,
+    DateTime,
+    Float,
+    JSON,
+    BigInteger,
+    Enum,
+    func
+)
 
 from common.constants import RunStatus
 
@@ -18,8 +30,8 @@ class Team(Base):
     tg_chat_id = Column(BigInteger, unique=True, nullable=False)
     name = Column(String(128), unique=True, nullable=False)
     endpoint_url = Column(String(512), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     runs = relationship("Run", back_populates="team")
     runs_csv = relationship("RunCSV", back_populates="team")
@@ -33,7 +45,7 @@ class Phase(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(128), unique=True, nullable=False)
     dataset_filename = Column(String(256), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     runs = relationship("Run", back_populates="phase")
     runs_csv = relationship("RunCSV", back_populates="phase")
@@ -54,7 +66,7 @@ class Run(Base):
     samples_success = Column(Integer, default=0)
     avg_latency_ms = Column(Float, nullable=True)
     f1 = Column(Float, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     team = relationship("Team", back_populates="runs")
     phase = relationship("Phase", back_populates="runs")
@@ -72,6 +84,7 @@ class Prediction(Base):
     ok = Column(Boolean, default=False)
     gold_json = Column(JSON, nullable=False)
     pred_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     run = relationship("Run", back_populates="predictions")
 
@@ -87,7 +100,7 @@ class RunCSV(Base):
     precision = Column(Float, nullable=True)
     recall = Column(Float, nullable=True)
     f1 = Column(Float, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     team = relationship("Team", back_populates="runs_csv")
     phase = relationship("Phase", back_populates="runs_csv")

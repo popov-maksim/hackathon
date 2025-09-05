@@ -1,8 +1,6 @@
 import io
 import os
 import logging
-import json
-from pathlib import Path
 
 import httpx
 from aiogram import Bot, Dispatcher, executor, types
@@ -161,8 +159,8 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         data = await api_get(f"/teams/{cid}/last_run")
         text = (
             f"Последний прогон run_id={data['run_id']}: {data['status']}\n"
-            f"{data['samples_done']}/{data['samples_total']}\n"
-            f"F1={data.get('f1_micro')} P={data.get('precision')} R={data.get('recall')}\n"
+            f"{data['samples_success']}/{data['samples_total']}\n"
+            f"F1={data.get('f1')}\n"
             f"avg_latency_ms={data.get('avg_latency_ms')}"
         )
         await bot.send_message(cid, text, reply_markup=kb_registered())
