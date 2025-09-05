@@ -41,6 +41,10 @@ class RegisterStates(StatesGroup):
     waiting_endpoint = State()
 
 
+class ChangeEndpointStates(StatesGroup):
+    waiting_endpoint = State()
+
+
 # --- Keyboards ---
 def kb_unregistered() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -55,6 +59,7 @@ def kb_registered() -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton(text="Показать результаты последней отправки", callback_data="last_result"),
         types.InlineKeyboardButton(text="Скачать датасет", callback_data="download_dataset"),
         types.InlineKeyboardButton(text="Лидерборд", callback_data="leaderboard"),
+        types.InlineKeyboardButton(text="Сменить URL сервиса", callback_data="change_endpoint"),
     )
     return kb
 
@@ -206,6 +211,34 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
         await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
     except Exception:
         await bot.send_message(cid, "Ошибка получения лидерборда", reply_markup=kb_registered())
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "change_endpoint")
+async def cb_change_endpoint(callback_query: types.CallbackQuery):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
+    await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host):")
+    await ChangeEndpointStates.waiting_endpoint.set()
+
+
+@dispatcher.message_handler(state=ChangeEndpointStates.waiting_endpoint)
+async def st_change_endpoint(message: types.Message, state: FSMContext):
+    cid = message.chat.id
+    endpoint = _normalize_endpoint(message.text)
+    try:
+        team = await api_get(f"/teams/{cid}")
+        resp = await api_post(
+            "/teams/register",
+            {"tg_chat_id": cid, "team_name": team["name"], "endpoint_url": endpoint},
+        )
+        await message.reply(
+            f"URL обновлён для команды: {resp['name']}.",
+            reply_markup=kb_registered(),
+        )
+    except Exception:
+        await message.reply("Не удалось обновить URL", reply_markup=kb_registered())
+    finally:
+        await state.finish()
 
 
 if __name__ == "__main__":
