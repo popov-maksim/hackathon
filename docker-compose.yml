@@ -1,48 +1,14 @@
 services:
 
-  db:
-    image: postgres:15
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - dbdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7
-    restart: always
-    ports:
-      - "6379:6379"
-
   api:
     build: ./api
     restart: always
     env_file: .env
-    depends_on:
-      - db
-      - redis
     volumes:
       - ./datasets:/data/datasets:ro
       - ./common:/app/common:ro
     ports:
       - "8000:8000"
-
-  worker:
-    build: ./worker
-    restart: always
-    env_file: .env
-    depends_on:
-      - db
-      - redis
-    volumes:
-      - ./datasets:/data/datasets:ro
-      - ./common:/app/common:ro
 
   bot:
     build: ./bot
@@ -50,6 +16,3 @@ services:
     env_file: .env
     depends_on:
       - api
-
-volumes:
-  dbdata:

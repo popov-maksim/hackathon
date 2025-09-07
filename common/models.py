@@ -10,7 +10,8 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Enum,
-    func
+    func,
+    UniqueConstraint,
 )
 
 from common.constants import RunStatus
@@ -78,6 +79,7 @@ class Prediction(Base):
 
     id = Column(Integer, primary_key=True)
     run_id = Column(Integer, ForeignKey("runs.id"), nullable=False)
+    sample_idx = Column(Integer, nullable=False, default=0)
     latency_ms = Column(Float, nullable=True)
     ok = Column(Boolean, default=False)
     gold_json = Column(JSON, nullable=False)
@@ -85,6 +87,10 @@ class Prediction(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     run = relationship("Run", back_populates="predictions")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "sample_idx", name="ux_predictions_run_sample"),
+    )
 
 
 class RunCSV(Base):

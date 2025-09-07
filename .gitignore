@@ -47,4 +47,3 @@ dump.rdb
 pgdata/
 dbdata/
 celerybeat-schedule*
-

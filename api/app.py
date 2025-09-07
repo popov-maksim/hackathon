@@ -1,9 +1,11 @@
 import os
 import io
 import csv
+import json
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from celery import Celery
+import boto3
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from fastapi import FastAPI, Depends, HTTPException
@@ -14,12 +16,23 @@ from common.db import get_session, async_engine
 from common.models import Base, Team, Phase, Run
 from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseIn, CreatePhaseOut,
                             StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem)
-from common.config import REDIS_URL, DATASETS_DIR
+from common.config import (
+    DATASETS_DIR,
+    YMQ_ENDPOINT_URL,
+    YMQ_REGION,
+    YMQ_QUEUE_URL,
+    YMQ_ACCESS_KEY,
+    YMQ_SECRET_KEY,
+    YMQ_SESSION_TOKEN,
+    N_CSV_ROWS,
+    SQS_SEND_BATCH_MAX,
+)
 from common.constants import RunStatus
+from common.utils import parse_annotation_literal
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
@@ -34,7 +47,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-celery_app = Celery(broker=REDIS_URL)
+def _sqs_client():
+    kwargs = {
+        "service_name": "sqs",
+        "endpoint_url": YMQ_ENDPOINT_URL,
+        "region_name": YMQ_REGION,
+    }
+    if YMQ_ACCESS_KEY and YMQ_SECRET_KEY:
+        kwargs.update({
+            "aws_access_key_id": YMQ_ACCESS_KEY,
+            "aws_secret_access_key": YMQ_SECRET_KEY,
+        })
+        if YMQ_SESSION_TOKEN:
+            kwargs["aws_session_token"] = YMQ_SESSION_TOKEN
+    return boto3.client(**kwargs)
+
+
+def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
+    if not YMQ_QUEUE_URL:
+        raise RuntimeError("YMQ_QUEUE_URL is not configured")
+    dataset_path = f"{DATASETS_DIR}/{phase.dataset_filename}"
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError("Dataset file not found")
+    client = _sqs_client()
+    total = 0
+    batch = []
+    with open(dataset_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter=";")
+        for idx, row in enumerate(reader):
+            if idx >= N_CSV_ROWS:
+                break
+            sample = row.get("sample", "")
+            gold = parse_annotation_literal(row.get("annotation", ""))
+            body = json.dumps({
+                "run_id": run.id,
+                "team_id": team.id,
+                "endpoint_url": team.endpoint_url,
+                "sample_idx": idx,
+                "sample": sample,
+                "gold": gold,
+            }, ensure_ascii=False)
+            batch.append({"Id": f"{run.id}-{idx}", "MessageBody": body})
+            total += 1
+            if len(batch) >= SQS_SEND_BATCH_MAX:
+                client.send_message_batch(QueueUrl=YMQ_QUEUE_URL, Entries=batch)
+                batch.clear()
+    if batch:
+        client.send_message_batch(QueueUrl=YMQ_QUEUE_URL, Entries=batch)
+    return total
 
 
 @app.get("/health")
@@ -129,41 +189,56 @@ async def download_current_phase_dataset(tg_chat_id: int, db: AsyncSession = Dep
 
 @app.post("/runs/start", response_model=StartRunOut)
 async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)):
-    """Запустить бомбардировку участника на данных текущего этапа"""
+    """Запустить оценку через Yandex Message Queue и Cloud Functions."""
+    # 1) Validate team and no active run
+    query = select(Team).where(Team.tg_chat_id == payload.tg_chat_id)
+    result = await db.execute(query)
+    team = result.scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Команда не найдена")
+    active_run_query = (
+        select(Run)
+        .where(Run.team_id == team.id)
+        .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
+        .limit(1)
+    )
+    if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="У команды уже есть активный запуск")
+
+    # 2) Current phase
+    result = await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))
+    phase = result.scalars().first()
+    if phase is None:
+        raise HTTPException(status_code=404, detail="Нет текущего этапа")
+
+    # 3) Create run (RUNNING), compute samples_total, publish messages
+    run = Run(
+        team_id=team.id,
+        phase_id=phase.id,
+        status=RunStatus.RUNNING,
+        started_at=datetime.now(timezone.utc),
+        samples_total=0,
+        samples_success=0,
+    )
     async with db.begin():
-        query = select(Team).where(Team.tg_chat_id == payload.tg_chat_id)
-        result = await db.execute(query)
-        team = result.scalar_one_or_none()
-        if team is None:
-            raise HTTPException(status_code=404, detail="Команда не найдена")
-        active_run_query = (
-            select(Run)
-            .where(Run.team_id == team.id)
-            .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
-            .limit(1)
-        )
-        if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
-            raise HTTPException(status_code=409, detail="У команды уже есть активный запуск")
-        current_phase_query = (
-            select(Phase)
-            .order_by(Phase.created_at.desc())
-            .limit(1)
-        )
-        result = await db.execute(current_phase_query)
-        phase = result.scalars().first()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Нет текущего этапа")
-        run = Run(
-            team_id=team.id,
-            phase_id=phase.id,
-            status=RunStatus.QUEUED,
-            started_at=None,
-            samples_total=0,
-            samples_success=0,
-        )
         db.add(run)
         await db.flush()
-    celery_app.send_task("tasks.start_run", args=[run.id], queue="runs")
+
+    try:
+        total = _publish_run_messages(team, phase, run)
+    except Exception as e:
+        # Best-effort: mark run back to queued on failure
+        async with db.begin():
+            res = await db.execute(select(Run).where(Run.id == run.id))
+            r = res.scalar_one()
+            r.status = RunStatus.QUEUED
+        raise HTTPException(status_code=500, detail=f"Не удалось поставить задачи в очередь: {e}")
+
+    async with db.begin():
+        res = await db.execute(select(Run).where(Run.id == run.id))
+        r = res.scalar_one()
+        r.samples_total = total
+
     return StartRunOut(run_id=run.id, status=run.status)
 
 
