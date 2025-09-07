@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy import (
     Column,
