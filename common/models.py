@@ -44,6 +44,8 @@ class Phase(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(128), unique=True, nullable=False)
     dataset_filename = Column(String(256), nullable=False)
+    # Максимальное количество строк из CSV для оценки на этапе
+    n_csv_rows = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     runs = relationship("Run", back_populates="phase")
