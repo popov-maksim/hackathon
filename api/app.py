@@ -222,7 +222,6 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
     )
     async with db.begin():
         db.add(run)
-        await db.flush()
 
     try:
         total = _publish_run_messages(team, phase, run)
@@ -245,8 +244,7 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
 @app.get("/runs/{run_id}/status", response_model=RunStatusOut)
 async def run_status(run_id: int, db: AsyncSession = Depends(get_session)):
     """Получение статуса запуска"""
-    query = select(Run).where(Run.id == run_id)
-    result = await db.execute(query)
+    result = await db.execute(select(Run).where(Run.id == run_id))
     run = result.scalar_one_or_none()
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск теста с таким ID не найден")
@@ -263,8 +261,7 @@ async def run_status(run_id: int, db: AsyncSession = Depends(get_session)):
 @app.get("/teams/{tg_chat_id}/last_run", response_model=RunStatusOut)
 async def get_last_run_status(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
     """Получение статуса последнего запуска командой"""
-    query = select(Team).where(Team.tg_chat_id == tg_chat_id)
-    result = await db.execute(query)
+    result = await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))
     team = result.scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
