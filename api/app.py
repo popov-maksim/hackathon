@@ -14,9 +14,8 @@ from fastapi.responses import StreamingResponse
 
 from common.db import get_session, async_engine
 from common.models import Base, Team, Phase, Run
-from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseIn, CreatePhaseOut,
-                            StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem,
-                            UpdatePhaseRowsIn)
+from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseOut,
+                            StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem)
 from common.config import (
     DATASETS_DIR,
     YMQ_ENDPOINT_URL,
@@ -25,7 +24,6 @@ from common.config import (
     YMQ_ACCESS_KEY,
     YMQ_SECRET_KEY,
     YMQ_SESSION_TOKEN,
-    N_CSV_ROWS,
     SQS_SEND_BATCH_MAX,
 )
 from common.constants import RunStatus
@@ -73,11 +71,11 @@ def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
     client = _sqs_client()
     total = 0
     batch = []
-    rows_limit = int(phase.n_csv_rows) if getattr(phase, "n_csv_rows", None) not in (None, 0) else N_CSV_ROWS
+    rows_limit = int(phase.n_csv_rows) if getattr(phase, "n_csv_rows", None) not in (None, 0) else None
     with open(dataset_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter=";")
         for idx, row in enumerate(reader):
-            if idx >= rows_limit:
+            if rows_limit is not None and idx >= rows_limit:
                 break
             sample = row.get("sample", "")
             gold = parse_annotation_literal(row.get("annotation", ""))
@@ -138,14 +136,45 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
-async def create_phase(payload: CreatePhaseIn, db: AsyncSession = Depends(get_session)):
-    """Создание нового этапа соревнования"""
-    query = select(Phase).where(Phase.name == payload.name)
+async def create_phase(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    n_csv_rows: int | None = Form(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """Создание нового этапа соревнования с загрузкой датасета.
+
+    Ожидает multipart/form-data:
+    - name: str — название этапа (уникально)
+    - file: UploadFile — CSV датасет (разделитель ';')
+    - n_csv_rows: int | None — максимальное число строк (None/0 = весь датасет)
+    """
+    query = select(Phase).where(Phase.name == name)
     result = await db.execute(query)
     phase = result.scalar_one_or_none()
     if phase is not None:
         raise HTTPException(status_code=400, detail="Этап с таким названием уже существует")
-    phase = Phase(name=payload.name, dataset_filename=payload.dataset_filename)
+    # Validate file
+    filename = file.filename
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Ожидается CSV файл")
+
+    # Save file
+    os.makedirs(DATASETS_DIR, exist_ok=True)
+    full_path = os.path.join(DATASETS_DIR, filename)
+    try:
+        with open(full_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось сохранить файл: {e}")
+
+    # Create phase
+    nr = int(n_csv_rows) if n_csv_rows not in (None, 0) else None
+    phase = Phase(name=name, dataset_filename=filename, n_csv_rows=nr)
     db.add(phase)
     await db.commit()
     await db.refresh(phase)
@@ -188,94 +217,6 @@ async def download_current_phase_dataset(tg_chat_id: int, db: AsyncSession = Dep
 
     headers = {"Content-Disposition": f'attachment; filename="{out_name}"'}
     return StreamingResponse(iter_csv(), media_type="text/csv", headers=headers)
-
-
-def _slugify(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
-    return "".join([ch if ch in allowed else "_" for ch in value])
-
-
-@app.post("/admin/phases/{phase_name}/dataset", response_model=CreatePhaseOut)
-async def upload_phase_dataset(
-    phase_name: str,
-    file: UploadFile = File(...),
-    n_csv_rows: int | None = Form(None),
-    db: AsyncSession = Depends(get_session),
-):
-    """Загрузка датасета для этапа по названию.
-
-    - Принимает CSV файл с разделителем ';'.
-    - Если этап с таким названием не найден — создаётся.
-    - Можно одновременно задать `n_csv_rows` (макс. кол-во строк для оценки).
-    """
-    filename = file.filename or "dataset.csv"
-    if not filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Ожидается CSV файл")
-
-    safe_phase = _slugify(phase_name)
-    safe_name = _slugify(filename)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    out_name = f"{safe_phase}-{ts}-{safe_name}"
-    os.makedirs(DATASETS_DIR, exist_ok=True)
-    full_path = os.path.join(DATASETS_DIR, out_name)
-
-    # Сохранение файла
-    try:
-        with open(full_path, "wb") as f:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Не удалось сохранить файл: {e}")
-
-    # Найти или создать этап
-    res = await db.execute(select(Phase).where(Phase.name == phase_name))
-    phase = res.scalar_one_or_none()
-    async with db.begin():
-        if phase is None:
-            phase = Phase(
-                name=phase_name,
-                dataset_filename=out_name,
-                n_csv_rows=(int(n_csv_rows) if n_csv_rows and int(n_csv_rows) > 0 else None),
-            )
-            db.add(phase)
-        else:
-            phase.dataset_filename = out_name
-            if n_csv_rows is not None:
-                nr = int(n_csv_rows)
-                if nr <= 0:
-                    raise HTTPException(status_code=400, detail="n_csv_rows должен быть > 0")
-                phase.n_csv_rows = nr
-
-    await db.refresh(phase)
-    return CreatePhaseOut(
-        phase_id=phase.id,
-        name=phase.name,
-        dataset_filename=phase.dataset_filename,
-        n_csv_rows=phase.n_csv_rows,
-    )
-
-
-@app.patch("/admin/phases/{phase_name}/n_rows", response_model=CreatePhaseOut)
-async def update_phase_n_rows(phase_name: str, payload: UpdatePhaseRowsIn, db: AsyncSession = Depends(get_session)):
-    """Обновить лимит строк CSV (`n_csv_rows`) для этапа по названию."""
-    if payload.n_csv_rows <= 0:
-        raise HTTPException(status_code=400, detail="n_csv_rows должен быть > 0")
-    res = await db.execute(select(Phase).where(Phase.name == phase_name))
-    phase = res.scalar_one_or_none()
-    if phase is None:
-        raise HTTPException(status_code=404, detail="Этап не найден")
-    async with db.begin():
-        phase.n_csv_rows = int(payload.n_csv_rows)
-    await db.refresh(phase)
-    return CreatePhaseOut(
-        phase_id=phase.id,
-        name=phase.name,
-        dataset_filename=phase.dataset_filename,
-        n_csv_rows=phase.n_csv_rows,
-    )
 
 
 @app.post("/runs/start", response_model=StartRunOut)

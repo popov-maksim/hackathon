@@ -16,6 +16,7 @@ class TeamOut(BaseModel):
 class CreatePhaseIn(BaseModel):
     name: str
     dataset_filename: str
+    n_csv_rows: int | None = None
 
 
 class CreatePhaseOut(BaseModel):
@@ -52,7 +53,3 @@ class LeaderboardItem(BaseModel):
 class LeaderboardOut(BaseModel):
     phase_id: int
     items: List[LeaderboardItem]
-
-
-class UpdatePhaseRowsIn(BaseModel):
-    n_csv_rows: int

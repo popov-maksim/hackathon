@@ -10,8 +10,6 @@ RUN_TIME_LIMIT_SECONDS = float(os.getenv("RUN_TIME_LIMIT_SECONDS", "1200"))  # 2
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
 
-N_CSV_ROWS = int(os.getenv("N_CSV_ROWS", "20"))
-
 # Yandex Message Queue (SQS-compatible)
 YMQ_ENDPOINT_URL = os.getenv("YMQ_ENDPOINT_URL", "https://message-queue.api.cloud.yandex.net")
 YMQ_REGION = os.getenv("YMQ_REGION", "ru-central1")
