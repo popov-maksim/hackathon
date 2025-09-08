@@ -16,12 +16,14 @@ class TeamOut(BaseModel):
 class CreatePhaseIn(BaseModel):
     name: str
     dataset_filename: str
+    n_csv_rows: int | None = None
 
 
 class CreatePhaseOut(BaseModel):
     phase_id: int
     name: str
     dataset_filename: str
+    n_csv_rows: int | None = None
 
 
 class StartRunIn(BaseModel):

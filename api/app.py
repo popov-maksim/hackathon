@@ -8,13 +8,13 @@ from contextlib import asynccontextmanager
 import boto3
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from common.db import get_session, async_engine
 from common.models import Base, Team, Phase, Run
-from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseIn, CreatePhaseOut,
+from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseOut,
                             StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem)
 from common.config import (
     DATASETS_DIR,
@@ -24,7 +24,6 @@ from common.config import (
     YMQ_ACCESS_KEY,
     YMQ_SECRET_KEY,
     YMQ_SESSION_TOKEN,
-    N_CSV_ROWS,
     SQS_SEND_BATCH_MAX,
 )
 from common.constants import RunStatus
@@ -72,10 +71,11 @@ def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
     client = _sqs_client()
     total = 0
     batch = []
+    rows_limit = int(phase.n_csv_rows) if getattr(phase, "n_csv_rows", None) not in (None, 0) else None
     with open(dataset_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter=";")
         for idx, row in enumerate(reader):
-            if idx >= N_CSV_ROWS:
+            if rows_limit is not None and idx >= rows_limit:
                 break
             sample = row.get("sample", "")
             gold = parse_annotation_literal(row.get("annotation", ""))
@@ -136,21 +136,53 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
-async def create_phase(payload: CreatePhaseIn, db: AsyncSession = Depends(get_session)):
-    """Создание нового этапа соревнования"""
-    query = select(Phase).where(Phase.name == payload.name)
+async def create_phase(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    n_csv_rows: int | None = Form(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """Создание нового этапа соревнования с загрузкой датасета.
+
+    Ожидает multipart/form-data:
+    - name: str — название этапа (уникально)
+    - file: UploadFile — CSV датасет (разделитель ';')
+    - n_csv_rows: int | None — максимальное число строк (None/0 = весь датасет)
+    """
+    query = select(Phase).where(Phase.name == name)
     result = await db.execute(query)
     phase = result.scalar_one_or_none()
     if phase is not None:
         raise HTTPException(status_code=400, detail="Этап с таким названием уже существует")
-    phase = Phase(name=payload.name, dataset_filename=payload.dataset_filename)
+    # Validate file
+    filename = file.filename
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Ожидается CSV файл")
+
+    # Save file
+    os.makedirs(DATASETS_DIR, exist_ok=True)
+    full_path = os.path.join(DATASETS_DIR, filename)
+    try:
+        with open(full_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось сохранить файл: {e}")
+
+    # Create phase
+    nr = int(n_csv_rows) if n_csv_rows not in (None, 0) else None
+    phase = Phase(name=name, dataset_filename=filename, n_csv_rows=nr)
     db.add(phase)
     await db.commit()
     await db.refresh(phase)
     return CreatePhaseOut(
         phase_id=phase.id,
         name=phase.name,
-        dataset_filename=phase.dataset_filename
+        dataset_filename=phase.dataset_filename,
+        n_csv_rows=phase.n_csv_rows,
     )
 
 

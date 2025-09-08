@@ -5,7 +5,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ./datasets:/data/datasets:ro
+      - ./datasets:/data/datasets:rw
       - ./common:/app/common:ro
     ports:
       - "8000:8000"
