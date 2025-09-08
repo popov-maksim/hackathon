@@ -1,7 +1,0 @@
-celery==5.4.0
-redis==5.0.7
-sqlalchemy==2.0.31
-asyncpg==0.29.0
-httpx==0.27.0
-pydantic==2.8.2
-python-dotenv==1.0.1
