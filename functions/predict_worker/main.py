@@ -116,11 +116,11 @@ async def _finalize_if_complete(run_id: int):
         f1_val = f1_macro(gold_pred_pairs) if gold_pred_pairs else 0.0
 
         # Best-effort finalize (no hard lock; last write wins)
-        async with db.begin():
-            run.avg_latency_ms = avg_latency_ms
-            run.f1 = f1_val
-            run.finished_at = datetime.now(timezone.utc)
-            run.status = RunStatus.DONE
+        run.avg_latency_ms = avg_latency_ms
+        run.f1 = f1_val
+        run.finished_at = datetime.now(timezone.utc)
+        run.status = RunStatus.DONE
+        await db.commit()
 
 
 def handler(event, context):

@@ -51,8 +51,7 @@ async def _finalize_run(run_id: int):
         run.f1 = f1_val
         run.finished_at = datetime.now(timezone.utc)
         run.status = RunStatus.DONE
-        async with db.begin():
-            db.add(run)
+        await db.commit()
         return True
 
 

@@ -252,23 +252,25 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
         samples_total=0,
         samples_success=0,
     )
-    async with db.begin():
-        db.add(run)
+    # Persist run to obtain ID without starting a nested transaction
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
 
     try:
         total = _publish_run_messages(team, phase, run)
     except Exception as e:
         # Best-effort: mark run back to queued on failure
-        async with db.begin():
-            res = await db.execute(select(Run).where(Run.id == run.id))
-            r = res.scalar_one()
-            r.status = RunStatus.QUEUED
-        raise HTTPException(status_code=500, detail=f"Не удалось поставить задачи в очередь: {e}")
-
-    async with db.begin():
         res = await db.execute(select(Run).where(Run.id == run.id))
         r = res.scalar_one()
-        r.samples_total = total
+        r.status = RunStatus.QUEUED
+        await db.commit()
+        raise HTTPException(status_code=500, detail=f"Не удалось поставить задачи в очередь: {e}")
+
+    res = await db.execute(select(Run).where(Run.id == run.id))
+    r = res.scalar_one()
+    r.samples_total = total
+    await db.commit()
 
     return StartRunOut(run_id=run.id, status=run.status)
 
