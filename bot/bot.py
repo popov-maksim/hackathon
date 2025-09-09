@@ -251,19 +251,111 @@ async def cb_run(callback_query: types.CallbackQuery):
 async def cb_last_result(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
+
+    def fmt_f1(v):
+        return f"{float(v):.4f}" if v is not None else "—"
+
+    def fmt_lat(v):
+        try:
+            return f"{float(v):.1f} ms" if v is not None else "—"
+        except Exception:
+            return "—"
+
+    def progress_bar(done: int, total: int, width: int = 20) -> str | None:
+        try:
+            td = int(done)
+            tt = int(total)
+        except Exception:
+            return None
+        if tt <= 0:
+            return None
+        ratio = max(0.0, min(1.0, (td / tt)))
+        filled = int(ratio * width)
+        empty = width - filled
+        bar = "█" * filled + "░" * empty
+        percent = int(ratio * 100)
+        return f"[{bar}] {percent}%"
+
+    status_map = {"queued": "В очереди", "running": "Выполняется", "done": "Завершено"}
+
+    # 1) Проверим регистрацию команды
     try:
-        data = await api_get(f"/teams/{cid}/last_run")
-        text = (
-            f"Последний прогон run_id={data['run_id']}: {data['status']}\n"
-            f"{data['samples_success']}/{data['samples_total']}\n"
-            f"F1={data.get('f1')}\n"
-            f"avg_latency_ms={data.get('avg_latency_ms')}"
-        )
-        await bot.send_message(cid, text, reply_markup=kb_registered())
+        team = await api_get(f"/teams/{cid}")
     except BackendError as e:
-        await bot.send_message(cid, f"Ошибка получения статуса: {e.message}", reply_markup=kb_registered())
+        if e.status == 404:
+            return await bot.send_message(cid, "Сначала зарегистрируйте команду.", reply_markup=kb_unregistered())
+        return await bot.send_message(cid, f"Не удалось получить данные команды: {e.message}")
     except Exception:
-        await bot.send_message(cid, "Неожиданная ошибка при получении статуса", reply_markup=kb_registered())
+        return await bot.send_message(cid, "Неожиданная ошибка при получении данных команды")
+
+    # 2) Последний запуск (а также текущий статус)
+    last = None
+    try:
+        last = await api_get(f"/teams/{cid}/last_run")
+    except BackendError as e:
+        if e.status == 404:
+            # Вообще не было запусков
+            return await bot.send_message(
+                cid,
+                "Пока нет ни одной оценки. Запустите проверку — всё получится! 🙂",
+                reply_markup=kb_registered(),
+            )
+        return await bot.send_message(cid, f"Ошибка получения результатов: {e.message}", reply_markup=kb_registered())
+    except Exception:
+        return await bot.send_message(cid, "Неожиданная ошибка при получении результатов", reply_markup=kb_registered())
+
+    # 3) Лидерборд — найдём лучшее решение и позицию
+    best_line = ""
+    rank_line = ""
+    try:
+        lb = await api_get("/leaderboard")
+        items = lb.get("items", [])
+        # Найти строку для команды
+        my_idx = None
+        my_item = None
+        for idx, it in enumerate(items, start=1):
+            if str(it.get("team_name")) == str(team.get("name")):
+                my_idx = idx
+                my_item = it
+                break
+        if my_item is not None:
+            best_line = f"Лучшее решение (F1): F1={fmt_f1(my_item.get('f1'))}, Latency={fmt_lat(my_item.get('avg_latency_ms'))}"
+            rank_line = f"Моё место в лидерборде: {my_idx} из {len(items)}"
+    except BackendError:
+        pass
+    except Exception:
+        pass
+
+    # 4) Соберём текст
+    cur_status = str(last.get("status"))
+    is_active = cur_status in ("queued", "running")
+    status_line = (
+        f"Текущая оценка: {status_map.get(cur_status, cur_status)} (run_id={last.get('run_id')}, {last.get('samples_success')}/{last.get('samples_total')})"
+        if is_active else "Сейчас нет активной оценки"
+    )
+    pb_line = None
+    if is_active:
+        pb = progress_bar(last.get("samples_success", 0) or 0, last.get("samples_total", 0) or 0)
+        if pb:
+            pb_line = f"Доля успешно отработанных: {pb}"
+
+    last_f1 = last.get("f1") if cur_status == "done" else None
+    last_lat = last.get("avg_latency_ms") if cur_status == "done" else None
+    last_line = f"Последняя отправка: F1={fmt_f1(last_f1)}, Latency={fmt_lat(last_lat)}"
+
+    lines = [
+        "Мои результаты",
+        status_line,
+        last_line,
+    ]
+    if pb_line:
+        lines.insert(2, pb_line)
+    if best_line:
+        lines.append(best_line)
+    if rank_line:
+        lines.append(rank_line)
+
+    await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered())
 
 
 @dispatcher.callback_query_handler(lambda c: c.data == "download_dataset", state='*')
