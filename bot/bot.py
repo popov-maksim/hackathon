@@ -105,18 +105,18 @@ class ChangeEndpointStates(StatesGroup):
 # --- Keyboards ---
 def kb_unregistered() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton(text="Регистрация команды", callback_data="register"))
+    kb.add(types.InlineKeyboardButton(text="📝 Регистрация команды", callback_data="register"))
     return kb
 
 
 def kb_registered() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton(text="Проверить решение", callback_data="run"),
-        types.InlineKeyboardButton(text="Показать результаты последней отправки", callback_data="last_result"),
-        types.InlineKeyboardButton(text="Скачать датасет", callback_data="download_dataset"),
-        types.InlineKeyboardButton(text="Лидерборд", callback_data="leaderboard"),
-        types.InlineKeyboardButton(text="Сменить URL сервиса", callback_data="change_endpoint"),
+        types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run"),
+        types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result"),
+        types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset"),
+        types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard"),
+        types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint"),
     )
     return kb
 
