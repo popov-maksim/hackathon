@@ -307,7 +307,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         return await bot.send_message(cid, "Неожиданная ошибка при получении результатов", reply_markup=kb_registered())
 
     # 3) Лидерборд — найдём лучшее решение и позицию
-    best_line = ""
+    best_block_lines: list[str] = []
     rank_line = ""
     try:
         lb = await api_get("/leaderboard")
@@ -321,7 +321,13 @@ async def cb_last_result(callback_query: types.CallbackQuery):
                 my_item = it
                 break
         if my_item is not None:
-            best_line = f"Лучшее решение (F1): F1={fmt_f1(my_item.get('f1'))}, Latency={fmt_lat(my_item.get('avg_latency_ms'))}"
+            best_f1 = my_item.get('f1')
+            best_lat = my_item.get('avg_latency_ms')
+            best_block_lines = [
+                "🏅 Лучшее решение (F1):",
+                f"|__ F1: `{fmt_f1(best_f1)}`",
+                f"|__ Latency: `{fmt_lat(best_lat)}`",
+            ]
             rank_line = f"Моё место в лидерборде: {my_idx} из {len(items)}"
     except BackendError:
         pass
@@ -348,7 +354,11 @@ async def cb_last_result(callback_query: types.CallbackQuery):
 
     last_f1 = last.get("f1") if cur_status == "done" else None
     last_lat = last.get("avg_latency_ms") if cur_status == "done" else None
-    last_line = f"🧪 Последняя отправка: F1 `{fmt_f1(last_f1)}` • Latency `{fmt_lat(last_lat)}`"
+    last_block_lines = [
+        "🧪 Последняя отправка:",
+        f"|__ F1: `{fmt_f1(last_f1)}`",
+        f"|__ Latency: `{fmt_lat(last_lat)}`",
+    ]
 
     lines = [header, ""]
     lines.append(status_line)
@@ -356,9 +366,9 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         lines.append(run_line)
     if pb_line:
         lines.append(pb_line)
-    lines.append(last_line)
-    if best_line:
-        lines.append(f"🏅 {best_line}")
+    lines.extend(last_block_lines)
+    if best_block_lines:
+        lines.extend(best_block_lines)
     if rank_line:
         lines.append(f"🏆 {rank_line}")
 
