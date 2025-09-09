@@ -112,7 +112,7 @@ async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
     team = result.scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
-    return TeamOut(team_id=team.id, name=team.name)
+    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url))
 
 
 @app.post("/teams/register", response_model=TeamOut)
@@ -133,7 +133,7 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
     else:
         team.endpoint_url = str(payload.endpoint_url)
         await db.commit()
-    return TeamOut(team_id=team.id, name=team.name)
+    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url))
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)

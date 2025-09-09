@@ -152,7 +152,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
         pass
     try:
         team = await api_get(f"/teams/{cid}")
-        text = f"Готово! Команда: {team.get('name')}.\nВыберите действие:"
+        url = team.get('endpoint_url')
+        url_line = f"\nТекущий URL: {url}" if url else ""
+        text = f"Готово! Команда: {team.get('name')}.{url_line}\nВыберите действие:"
         kb = kb_registered()
     except BackendError as e:
         if e.status == 404:
@@ -206,7 +208,7 @@ async def st_register_endpoint(message: types.Message, state: FSMContext):
     try:
         resp = await api_post("/teams/register", {"tg_chat_id": message.chat.id, "team_name": team_name, "endpoint_url": endpoint})
         await message.reply(
-            f"Регистрация завершена: team_id={resp['team_id']}.",
+            f"Регистрация завершена.\nНазвание команды: {resp['name']}\nТекущий URL: {resp.get('endpoint_url', endpoint)}",
             reply_markup=kb_registered()
         )
         await state.finish()
@@ -344,7 +346,7 @@ async def st_change_endpoint(message: types.Message, state: FSMContext):
             {"tg_chat_id": cid, "team_name": team["name"], "endpoint_url": endpoint},
         )
         await message.reply(
-            f"URL обновлён для команды: {resp['name']}.",
+            f"Готово. Обновлён URL для команды: {resp['name']}\nТекущий URL: {resp.get('endpoint_url', endpoint)}",
             reply_markup=kb_registered(),
         )
         await state.finish()

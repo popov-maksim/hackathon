@@ -11,6 +11,7 @@ class RegisterTeamIn(BaseModel):
 class TeamOut(BaseModel):
     team_id: int
     name: str
+    endpoint_url: str
 
 
 class CreatePhaseIn(BaseModel):
