@@ -72,7 +72,8 @@ def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
     total = 0
     batch = []
     rows_limit = int(phase.n_csv_rows) if getattr(phase, "n_csv_rows", None) not in (None, 0) else None
-    with open(dataset_path, newline="", encoding="utf-8") as f:
+    # Use utf-8-sig to gracefully handle CSVs saved with BOM (e.g., Excel)
+    with open(dataset_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=";")
         for idx, row in enumerate(reader):
             if rows_limit is not None and idx >= rows_limit:
@@ -208,7 +209,8 @@ async def download_current_phase_dataset(tg_chat_id: int, db: AsyncSession = Dep
         yield buf.getvalue().encode("utf-8")
         buf.seek(0); buf.truncate(0)
 
-        with open(full_path, newline="", encoding="utf-8") as f:
+        # Use utf-8-sig to ignore BOM in header if present
+        with open(full_path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f, delimiter=";")
             for row in reader:
                 writer.writerow([row.get("sample", "")])
