@@ -102,77 +102,36 @@ if [[ -z "$QUEUE_IDENT" || "$QUEUE_IDENT" == "" ]]; then
 fi
 
 if [[ -n "$QUEUE_IDENT" ]]; then
+  # Delete existing MQ trigger to avoid CLI update quirks
   if yc serverless trigger get --name "$TRIGGER_MQ_NAME" >/dev/null 2>&1; then
-    echo "[i] Trigger '$TRIGGER_MQ_NAME' already exists; attempting update"
-    # Try update; if not supported, skip
-    if yc serverless trigger update message-queue --help >/dev/null 2>&1; then
-      set +e
-      yc serverless trigger update message-queue \
-        --name "$TRIGGER_MQ_NAME" \
-        --queue "$QUEUE_IDENT" \
-        --queue-service-account-id "$YC_SA_ID" \
-        --invoke-function-name "$FN_PREDICT_NAME" \
-        --invoke-function-service-account-id "$YC_SA_ID" \
-        --batch-size "$TRIGGER_BATCH_SIZE" \
-        --batch-cutoff "$TRIGGER_BATCH_CUTOFF" \
-        --visibility-timeout "$TRIGGER_VISIBILITY_TIMEOUT" >/dev/null 2>&1
-      rc=$?
-      set -e
-      if [[ $rc -ne 0 ]]; then
-        echo "[!] Could not update MQ trigger (CLI may not support update); leaving as is" >&2
-      fi
-    else
-      echo "[!] Your yc CLI may not support trigger update; leaving existing trigger as is" >&2
-    fi
-  else
-    echo "[i] Creating MQ trigger '$TRIGGER_MQ_NAME'"
-    # Detect supported options
-    MQ_FLAGS=(--name "$TRIGGER_MQ_NAME" --queue "$QUEUE_IDENT" --queue-service-account-id "$YC_SA_ID" --invoke-function-name "$FN_PREDICT_NAME" --invoke-function-service-account-id "$YC_SA_ID")
-    if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--batch-size'; then
-      MQ_FLAGS+=(--batch-size "$TRIGGER_BATCH_SIZE")
-    fi
-    if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--batch-cutoff'; then
-      MQ_FLAGS+=(--batch-cutoff "$TRIGGER_BATCH_CUTOFF")
-    fi
-    if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--visibility-timeout'; then
-      MQ_FLAGS+=(--visibility-timeout "$TRIGGER_VISIBILITY_TIMEOUT")
-    fi
-    yc serverless trigger create message-queue "${MQ_FLAGS[@]}"
+    yc serverless trigger delete --name "$TRIGGER_MQ_NAME"
   fi
+  echo "[i] Creating MQ trigger '$TRIGGER_MQ_NAME'"
+  MQ_FLAGS=(--name "$TRIGGER_MQ_NAME" --queue "$QUEUE_IDENT" --queue-service-account-id "$YC_SA_ID" --invoke-function-name "$FN_PREDICT_NAME" --invoke-function-service-account-id "$YC_SA_ID")
+  if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--batch-size'; then
+    MQ_FLAGS+=(--batch-size "$TRIGGER_BATCH_SIZE")
+  fi
+  if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--batch-cutoff'; then
+    MQ_FLAGS+=(--batch-cutoff "$TRIGGER_BATCH_CUTOFF")
+  fi
+  yc serverless trigger create message-queue "${MQ_FLAGS[@]}"
 else
   echo "[!] YMQ_QUEUE_URL or YMQ_QUEUE_ARN not set; skipping MQ trigger creation" >&2
 fi
 
 # Run-finalizer timer trigger
 TRIGGER_TIMER_NAME="${TRIGGER_TIMER_NAME:-run-finalizer-trigger}"
-# Yandex Cloud timer expects Quartz-style 6-field cron (seconds minutes hours day-of-month month day-of-week with '?' somewhere).
-# Default: every minute at second 0.
-CRON_EXPR="${TRIGGER_TIMER_CRON:-0 0/1 * * ? *}"
+# Yandex Cloud timer expects Quartz-style 6-field cron
+CRON_EXPR="${TRIGGER_TIMER_CRON:-* * * * ? *}"
 
 if yc serverless trigger get --name "$TRIGGER_TIMER_NAME" >/dev/null 2>&1; then
-  echo "[i] Timer trigger '$TRIGGER_TIMER_NAME' already exists; attempting update"
-  if yc serverless trigger update timer --help >/dev/null 2>&1; then
-    set +e
-    yc serverless trigger update timer \
-      --name "$TRIGGER_TIMER_NAME" \
-      --cron-expression "$CRON_EXPR" \
-      --invoke-function-name "$FN_FINALIZER_NAME" \
-      --invoke-function-service-account-id "$YC_SA_ID" >/dev/null 2>&1
-    rc=$?
-    set -e
-    if [[ $rc -ne 0 ]]; then
-      echo "[!] Could not update timer trigger; leaving as is" >&2
-    fi
-  else
-    echo "[!] Your yc CLI may not support trigger update; leaving existing timer trigger as is" >&2
-  fi
-else
-  echo "[i] Creating timer trigger '$TRIGGER_TIMER_NAME'"
-  yc serverless trigger create timer \
-    --name "$TRIGGER_TIMER_NAME" \
-    --cron-expression "$CRON_EXPR" \
-    --invoke-function-name "$FN_FINALIZER_NAME" \
-    --invoke-function-service-account-id "$YC_SA_ID"
+  yc serverless trigger delete --name "$TRIGGER_TIMER_NAME"
 fi
+echo "[i] Creating timer trigger '$TRIGGER_TIMER_NAME'"
+yc serverless trigger create timer \
+  --name "$TRIGGER_TIMER_NAME" \
+  --cron-expression "$CRON_EXPR" \
+  --invoke-function-name "$FN_FINALIZER_NAME" \
+  --invoke-function-service-account-id "$YC_SA_ID"
 
 echo "[✓] Triggers ensured: $TRIGGER_MQ_NAME, $TRIGGER_TIMER_NAME"
