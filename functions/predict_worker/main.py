@@ -69,8 +69,10 @@ async def _process_message(
             pred_json = normalize_pred(data)
             ok = True
             latency_ms = (time.perf_counter() - t0) * 1000.0
-    except Exception:
-        pass
+        else:
+            logger.info("REQUEST ERROR", extra={'status_code': resp.status_code, 'text': resp.text})
+    except Exception as e:
+        logger.info("REQUEST ERROR", extra={'error': type(e)})
 
     # DB session per message, using factory provided for this invocation
     assert SessionLocal is not None, "SessionLocal must be provided"
@@ -98,6 +100,8 @@ async def _process_message(
 
 
 def handler(event, context):
+    logger.info("REQUEST_READ_TIMEOUT", extra={'REQUEST_READ_TIMEOUT': REQUEST_READ_TIMEOUT})
+    logger.info("REQUEST_CONNECT_TIMEOUT", extra={'REQUEST_CONNECT_TIMEOUT': REQUEST_CONNECT_TIMEOUT})
     logger.info("EVENT", extra=event)
 
     messages = []

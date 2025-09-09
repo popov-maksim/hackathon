@@ -92,6 +92,18 @@ async def api_get(path):
             raise BackendError("Сервис API недоступен. Проверьте URL и доступность.")
 
 
+async def api_post_multipart(path, data: dict, files: dict):
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            r = await client.post(API_BASE_URL + path, data=data, files=files)
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise BackendError(_extract_backend_error(e.response), e.response.status_code)
+        except httpx.RequestError:
+            raise BackendError("Сервис API недоступен. Проверьте URL и доступность.")
+
+
 # states
 class RegisterStates(StatesGroup):
     waiting_team = State()
@@ -100,6 +112,10 @@ class RegisterStates(StatesGroup):
 
 class ChangeEndpointStates(StatesGroup):
     waiting_endpoint = State()
+
+
+class UploadCSVStates(StatesGroup):
+    waiting_file = State()
 
 
 # --- Keyboards ---
@@ -115,6 +131,8 @@ def kb_registered() -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run"),
         types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result"),
         types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset"),
+        types.InlineKeyboardButton(text="📤 Загрузить CSV предсказаний", callback_data="upload_csv"),
+        types.InlineKeyboardButton(text="🧾 Оффлайн результат", callback_data="last_csv_result"),
         types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard"),
         types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint"),
     )
@@ -401,6 +419,56 @@ async def cb_download_dataset(callback_query: types.CallbackQuery):
         await bot.send_message(cid, "Неожиданная ошибка при загрузке датасета", reply_markup=kb_registered())
 
 
+@dispatcher.callback_query_handler(lambda c: c.data == "upload_csv", state='*')
+async def cb_upload_csv(callback_query: types.CallbackQuery, state: FSMContext):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
+    # Закроем любой предыдущий flow
+    try:
+        await state.finish()
+    except Exception:
+        pass
+    await bot.send_message(
+        cid,
+        "Пришлите CSV-файл с вашими предсказаниями (столбец 'annotation', разделитель ';').",
+    )
+    await UploadCSVStates.waiting_file.set()
+
+
+@dispatcher.message_handler(content_types=[types.ContentType.DOCUMENT], state=UploadCSVStates.waiting_file)
+async def st_upload_csv_file(message: types.Message, state: FSMContext):
+    cid = message.chat.id
+    doc = message.document
+    if not doc or not str(doc.file_name or "").lower().endswith(".csv"):
+        return await message.reply("Нужен CSV-файл. Попробуйте снова или /cancel для отмены.")
+    try:
+        # Получим путь к файлу в Telegram
+        tg_file = await bot.get_file(doc.file_id)
+        file_path = tg_file.file_path
+        # Скачаем байты файла
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            resp = await client.get(url)
+            resp.raise_for_status()
+            file_bytes = resp.content
+
+        files = {"file": (doc.file_name or "predictions.csv", file_bytes, "text/csv")}
+        data = {"tg_chat_id": str(cid)}
+        res = await api_post_multipart("/runs_csv/upload", data=data, files=files)
+        await message.reply(
+            f"Файл получен. Начинаем оффлайн-оценку. run_csv_id={res.get('run_csv_id')}\n"
+            f"Нажмите '🧾 Оффлайн результат' чтобы посмотреть статус.",
+            reply_markup=kb_registered(),
+        )
+        await state.finish()
+    except BackendError as e:
+        await message.reply(f"Ошибка загрузки: {e.message}", reply_markup=kb_registered())
+        await state.finish()
+    except Exception:
+        await message.reply("Неожиданная ошибка при загрузке файла", reply_markup=kb_registered())
+        await state.finish()
+
+
 @dispatcher.callback_query_handler(lambda c: c.data == "leaderboard", state='*')
 async def cb_leaderboard(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
@@ -425,6 +493,28 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
         await bot.send_message(cid, f"Ошибка получения лидерборда: {e.message}", reply_markup=kb_registered())
     except Exception:
         await bot.send_message(cid, "Неожиданная ошибка при получении лидерборда", reply_markup=kb_registered())
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "last_csv_result", state='*')
+async def cb_last_csv_result(callback_query: types.CallbackQuery):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
+    try:
+        data = await api_get(f"/teams/{cid}/last_csv")
+        status = str(data.get("status"))
+        f1 = data.get("f1")
+        if status == "done":
+            msg = f"🧾 Оффлайн оценка: F1 = {float(f1):.4f}"
+        else:
+            msg = "🧾 Оффлайн оценка: выполняется…"
+        await bot.send_message(cid, msg, reply_markup=kb_registered())
+    except BackendError as e:
+        if e.status == 404:
+            await bot.send_message(cid, "Пока нет оффлайн-оценок. Загрузите CSV предсказаний.", reply_markup=kb_registered())
+        else:
+            await bot.send_message(cid, f"Ошибка получения оффлайн-результата: {e.message}", reply_markup=kb_registered())
+    except Exception:
+        await bot.send_message(cid, "Неожиданная ошибка при получении оффлайн-результата", reply_markup=kb_registered())
 
 
 @dispatcher.callback_query_handler(lambda c: c.data == "change_endpoint", state='*')

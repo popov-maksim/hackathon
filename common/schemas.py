@@ -54,3 +54,16 @@ class LeaderboardItem(BaseModel):
 class LeaderboardOut(BaseModel):
     phase_id: int
     items: List[LeaderboardItem]
+
+
+class RunCSVStartOut(BaseModel):
+    run_csv_id: int
+    status: str
+
+
+class RunCSVStatusOut(BaseModel):
+    run_csv_id: int
+    status: str
+    f1: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None

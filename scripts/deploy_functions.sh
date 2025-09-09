@@ -14,12 +14,13 @@ BUILD_DIR="$ROOT_DIR/build"
 
 FN_PREDICT_NAME="${FN_PREDICT_NAME:-predict-worker}"
 FN_FINALIZER_NAME="${FN_FINALIZER_NAME:-run-finalizer}"
+FN_OFFLINE_CSV_NAME="${FN_OFFLINE_CSV_NAME:-offline-csv-worker}"
 
 # Load .env if present to pick DB/TIMEOUT vars
 if [[ -f "$ROOT_DIR/.env" ]]; then
   while IFS= read -r line; do
     case "$line" in
-      POSTGRES_USER=*|POSTGRES_PASSWORD=*|POSTGRES_DB=*|POSTGRES_HOST=*|POSTGRES_PORT=*|REQUEST_CONNECT_TIMEOUT=*|REQUEST_READ_TIMEOUT=*|RUN_TIME_LIMIT_SECONDS=*|YMQ_QUEUE_URL=*|YMQ_QUEUE_ARN=*)
+      POSTGRES_USER=*|POSTGRES_PASSWORD=*|POSTGRES_DB=*|POSTGRES_HOST=*|POSTGRES_PORT=*|REQUEST_CONNECT_TIMEOUT=*|REQUEST_READ_TIMEOUT=*|RUN_TIME_LIMIT_SECONDS=*|YMQ_QUEUE_URL=*|YMQ_QUEUE_ARN=*|S3_ENDPOINT_URL=*|S3_REGION=*|S3_OFFLINE_BUCKET=*)
         key="${line%%=*}"
         val="${line#*=}"
         # strip inline comments only if preceded by whitespace (preserves '#' inside values)
@@ -33,7 +34,7 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 # Validate required envs
-req_vars=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES_HOST POSTGRES_PORT REQUEST_CONNECT_TIMEOUT REQUEST_READ_TIMEOUT RUN_TIME_LIMIT_SECONDS)
+req_vars=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES_HOST POSTGRES_PORT REQUEST_CONNECT_TIMEOUT REQUEST_READ_TIMEOUT RUN_TIME_LIMIT_SECONDS S3_ENDPOINT_URL S3_REGION S3_OFFLINE_BUCKET)
 for v in "${req_vars[@]}"; do
   if [[ -z "${!v:-}" ]]; then
     echo "[!] Missing env var: $v" >&2
@@ -47,6 +48,7 @@ echo "[i] Building function sources..."
 echo "[i] Ensuring functions exist..."
 yc serverless function create --name "$FN_PREDICT_NAME" >/dev/null 2>&1 || true
 yc serverless function create --name "$FN_FINALIZER_NAME" >/dev/null 2>&1 || true
+yc serverless function create --name "$FN_OFFLINE_CSV_NAME" >/dev/null 2>&1 || true
 
 echo "[i] Deploying version: $FN_PREDICT_NAME"
 yc serverless function version create \
@@ -84,7 +86,25 @@ yc serverless function version create \
   --environment POSTGRES_PORT="$POSTGRES_PORT" \
   --environment RUN_TIME_LIMIT_SECONDS="$RUN_TIME_LIMIT_SECONDS"
 
-echo "[✓] Deployed Cloud Functions. Create triggers in YC console or with yc CLI."
+echo "[i] Deploying version: $FN_OFFLINE_CSV_NAME"
+yc serverless function version create \
+  --function-name "$FN_OFFLINE_CSV_NAME" \
+  --runtime python311 \
+  --entrypoint main.handler \
+  --memory 512MB \
+  --execution-timeout 120s \
+  --service-account-id "$YC_SA_ID" \
+  --source-path "$BUILD_DIR/offline_csv_worker" \
+  --network-name default \
+  --environment POSTGRES_USER="$POSTGRES_USER" \
+  --environment POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  --environment POSTGRES_DB="$POSTGRES_DB" \
+  --environment POSTGRES_HOST="$POSTGRES_HOST" \
+  --environment POSTGRES_PORT="$POSTGRES_PORT" \
+  --environment S3_ENDPOINT_URL="$S3_ENDPOINT_URL" \
+  --environment S3_OFFLINE_BUCKET="$S3_OFFLINE_BUCKET"
+
+echo "[✓] Deployed Cloud Functions."
 
 # --- Triggers registration ---
 echo "[i] Ensuring triggers exist..."
