@@ -277,6 +277,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         return f"[{bar}] {percent}%"
 
     status_map = {"queued": "В очереди", "running": "Выполняется", "done": "Завершено"}
+    status_emoji = {"queued": "⏳", "running": "🔄", "done": "✅"}
 
     # 1) Проверим регистрацию команды
     try:
@@ -297,8 +298,9 @@ async def cb_last_result(callback_query: types.CallbackQuery):
             # Вообще не было запусков
             return await bot.send_message(
                 cid,
-                "Пока нет ни одной оценки. Запустите проверку — всё получится! 🙂",
+                "📊 *Мои результаты*\n\nПока нет ни одной оценки. 🚀 Запустите проверку — всё получится! 🙂",
                 reply_markup=kb_registered(),
+                parse_mode="Markdown",
             )
         return await bot.send_message(cid, f"Ошибка получения результатов: {e.message}", reply_markup=kb_registered())
     except Exception:
@@ -329,10 +331,15 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     # 4) Соберём текст
     cur_status = str(last.get("status"))
     is_active = cur_status in ("queued", "running")
-    status_line = (
-        f"Текущая оценка: {status_map.get(cur_status, cur_status)} (run_id={last.get('run_id')}, {last.get('samples_success')}/{last.get('samples_total')})"
-        if is_active else "Сейчас нет активной оценки"
-    )
+    header = "📊 *Мои результаты*"
+    if is_active:
+        st = status_map.get(cur_status, cur_status)
+        st_emoji = status_emoji.get(cur_status, "ℹ️")
+        status_line = f"{st_emoji} Статус: {st}"
+        run_line = f"Запуск: `run_id={last.get('run_id')}`  `{last.get('samples_success')}/{last.get('samples_total')}`"
+    else:
+        status_line = "ℹ️ Статус: Сейчас нет активной оценки"
+        run_line = None
     pb_line = None
     if is_active:
         pb = progress_bar(last.get("samples_success", 0) or 0, last.get("samples_total", 0) or 0)
@@ -341,21 +348,21 @@ async def cb_last_result(callback_query: types.CallbackQuery):
 
     last_f1 = last.get("f1") if cur_status == "done" else None
     last_lat = last.get("avg_latency_ms") if cur_status == "done" else None
-    last_line = f"Последняя отправка: F1={fmt_f1(last_f1)}, Latency={fmt_lat(last_lat)}"
+    last_line = f"🧪 Последняя отправка: F1 `{fmt_f1(last_f1)}` • Latency `{fmt_lat(last_lat)}`"
 
-    lines = [
-        "Мои результаты",
-        status_line,
-        last_line,
-    ]
+    lines = [header, ""]
+    lines.append(status_line)
+    if run_line:
+        lines.append(run_line)
     if pb_line:
-        lines.insert(2, pb_line)
+        lines.append(pb_line)
+    lines.append(last_line)
     if best_line:
-        lines.append(best_line)
+        lines.append(f"🏅 {best_line}")
     if rank_line:
-        lines.append(rank_line)
+        lines.append(f"🏆 {rank_line}")
 
-    await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered())
+    await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered(), parse_mode="Markdown")
 
 
 @dispatcher.callback_query_handler(lambda c: c.data == "download_dataset", state='*')
