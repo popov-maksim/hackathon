@@ -18,19 +18,78 @@ bot = Bot(token=BOT_TOKEN)
 dispatcher = Dispatcher(bot, storage=MemoryStorage())
 
 
-# --- HTTP helpers ---
+class BackendError(Exception):
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _extract_backend_error(resp: httpx.Response) -> str:
+    try:
+        data = resp.json()
+    except Exception:
+        text = (resp.text or "").strip()
+        return f"Ошибка {resp.status_code}: {text or 'Неизвестная ошибка'}"
+    # FastAPI HTTPException: {"detail": "..."} или {"detail": [{...}]}
+    if isinstance(data, dict) and "detail" in data:
+        detail = data["detail"]
+        if isinstance(detail, str):
+            return detail
+        if isinstance(detail, list):
+            parts = []
+            for item in detail:
+                try:
+                    msg = item.get("msg") if isinstance(item, dict) else None
+                    loc = item.get("loc") if isinstance(item, dict) else None
+                except Exception:
+                    msg, loc = None, None
+                if loc and msg:
+                    parts.append(f"{'.'.join(str(p) for p in loc)}: {msg}")
+                elif msg:
+                    parts.append(str(msg))
+                else:
+                    parts.append(str(item))
+            return "; ".join(parts) or f"Ошибка {resp.status_code}"
+        return str(detail)
+    # Валидационные ошибки могут приходить как список
+    if isinstance(data, list):
+        parts = []
+        for item in data:
+            if isinstance(item, dict) and "msg" in item:
+                loc = item.get("loc")
+                if loc:
+                    parts.append(f"{'.'.join(str(p) for p in loc)}: {item['msg']}")
+                else:
+                    parts.append(str(item["msg"]))
+            else:
+                parts.append(str(item))
+        return "; ".join(parts) or f"Ошибка {resp.status_code}"
+    return f"Ошибка {resp.status_code}: {data}"
+
+
 async def api_post(path, json):
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(API_BASE_URL + path, json=json)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = await client.post(API_BASE_URL + path, json=json)
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise BackendError(_extract_backend_error(e.response), e.response.status_code)
+        except httpx.RequestError:
+            raise BackendError("Сервис API недоступен. Проверьте URL и доступность.")
 
 
 async def api_get(path):
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(API_BASE_URL + path)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = await client.get(API_BASE_URL + path)
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise BackendError(_extract_backend_error(e.response), e.response.status_code)
+        except httpx.RequestError:
+            raise BackendError("Сервис API недоступен. Проверьте URL и доступность.")
 
 
 # states
@@ -66,6 +125,8 @@ async def main_menu_keyboard(chat_id: int) -> types.InlineKeyboardMarkup:
     try:
         _ = await api_get(f"/teams/{chat_id}")
         is_registered = True
+    except BackendError as e:
+        is_registered = False if e.status == 404 else True
     except Exception:
         is_registered = False
     return kb_registered() if is_registered else kb_unregistered()
@@ -81,32 +142,50 @@ def _normalize_endpoint(s: str) -> str:
 
 
 # --- /start ---
-@dispatcher.message_handler(commands=["start", "help"])
-async def cmd_start(message: types.Message):
+@dispatcher.message_handler(commands=["start", "help"], state='*')
+async def cmd_start(message: types.Message, state: FSMContext):
     cid = message.chat.id
+    # Всегда выходим из любого активного состояния при /start
+    try:
+        await state.finish()
+    except Exception:
+        pass
     try:
         team = await api_get(f"/teams/{cid}")
-        is_registered = True
-    except Exception:
-        is_registered = False
-        team = {}
-    if is_registered:
         text = f"Готово! Команда: {team.get('name')}.\nВыберите действие:"
-    else:
-        text = "Добро пожаловать! Сначала зарегистрируйте команду."
-    await message.reply(text, reply_markup=await main_menu_keyboard(cid))
+        kb = kb_registered()
+    except BackendError as e:
+        if e.status == 404:
+            text = "Добро пожаловать! Сначала зарегистрируйте команду."
+            kb = kb_unregistered()
+        else:
+            text = f"Не удалось проверить регистрацию: {e.message}"
+            kb = kb_unregistered()
+    except Exception:
+        text = "Не удалось проверить регистрацию (неожиданная ошибка)."
+        kb = kb_unregistered()
+    await message.reply(text, reply_markup=kb)
 
 
 # --- Callbacks: registration flow (2 steps) ---
-@dispatcher.callback_query_handler(lambda c: c.data == "register")
-async def cb_register(callback_query: types.CallbackQuery):
+@dispatcher.callback_query_handler(lambda c: c.data == "register", state='*')
+async def cb_register(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.answer()
+    # Закрываем любой предыдущий flow перед началом регистрации
+    try:
+        await state.finish()
+    except Exception:
+        pass
     await bot.send_message(callback_query.message.chat.id, "Введите название команды:")
     await RegisterStates.waiting_team.set()
 
 
 @dispatcher.message_handler(state=RegisterStates.waiting_team)
 async def st_register_team(message: types.Message, state: FSMContext):
+    if not message.text or not isinstance(message.text, str):
+        return await message.reply("Пожалуйста, отправьте название команды текстом. Или /cancel для отмены.")
+    if message.text.startswith('/'):
+        return await message.reply("Это похоже на команду. Отправьте название команды текстом или используйте /cancel.")
     team = message.text.strip()
     if not team:
         return await message.reply("Название команды не может быть пустым. Введите ещё раз:")
@@ -117,6 +196,10 @@ async def st_register_team(message: types.Message, state: FSMContext):
 
 @dispatcher.message_handler(state=RegisterStates.waiting_endpoint)
 async def st_register_endpoint(message: types.Message, state: FSMContext):
+    if not message.text or not isinstance(message.text, str):
+        return await message.reply("Пожалуйста, отправьте URL текстом. Или /cancel для отмены.")
+    if message.text.startswith('/'):
+        return await message.reply("Это похоже на команду. Отправьте URL текстом или используйте /cancel.")
     endpoint = _normalize_endpoint(message.text)
     data = await state.get_data()
     team_name = data.get("team_name")
@@ -126,20 +209,29 @@ async def st_register_endpoint(message: types.Message, state: FSMContext):
             f"Регистрация завершена: team_id={resp['team_id']}.",
             reply_markup=kb_registered()
         )
+        await state.finish()
+    except BackendError as e:
+        # Для ошибок валидации оставляем пользователя в том же шаге
+        if e.status in (400, 422):
+            await message.reply(f"Ошибка регистрации: {e.message}\nВведите корректный URL или /cancel для отмены.")
+            return
+        await message.reply(f"Ошибка регистрации: {e.message}", reply_markup=kb_unregistered())
+        await state.finish()
     except Exception:
-        await message.reply("Ошибка регистрации", reply_markup=kb_unregistered())
-    finally:
+        await message.reply("Неожиданная ошибка при регистрации", reply_markup=kb_unregistered())
         await state.finish()
 
 
 # --- Callbacks: run check and last result ---
-@dispatcher.callback_query_handler(lambda c: c.data == "run")
+@dispatcher.callback_query_handler(lambda c: c.data == "run", state='*')
 async def cb_run(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
     try:
         _ = await api_get(f"/teams/{cid}")
         is_registered = True
+    except BackendError as e:
+        is_registered = False if e.status == 404 else True
     except Exception:
         is_registered = False
     if not is_registered:
@@ -147,11 +239,13 @@ async def cb_run(callback_query: types.CallbackQuery):
     try:
         data = await api_post("/runs/start", {"tg_chat_id": cid})
         await bot.send_message(cid, f"Запущен тест: run_id={data['run_id']}, status={data['status']}", reply_markup=kb_registered())
+    except BackendError as e:
+        await bot.send_message(cid, f"Ошибка запуска: {e.message}", reply_markup=kb_registered())
     except Exception:
-        await bot.send_message(cid, "Ошибка запуска", reply_markup=kb_registered())
+        await bot.send_message(cid, "Неожиданная ошибка при запуске", reply_markup=kb_registered())
 
 
-@dispatcher.callback_query_handler(lambda c: c.data == "last_result")
+@dispatcher.callback_query_handler(lambda c: c.data == "last_result", state='*')
 async def cb_last_result(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
@@ -164,30 +258,39 @@ async def cb_last_result(callback_query: types.CallbackQuery):
             f"avg_latency_ms={data.get('avg_latency_ms')}"
         )
         await bot.send_message(cid, text, reply_markup=kb_registered())
+    except BackendError as e:
+        await bot.send_message(cid, f"Ошибка получения статуса: {e.message}", reply_markup=kb_registered())
     except Exception:
-        await bot.send_message(cid, "Ошибка получения статуса", reply_markup=kb_registered())
+        await bot.send_message(cid, "Неожиданная ошибка при получении статуса", reply_markup=kb_registered())
 
 
-@dispatcher.callback_query_handler(lambda c: c.data == "download_dataset")
+@dispatcher.callback_query_handler(lambda c: c.data == "download_dataset", state='*')
 async def cb_download_dataset(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.get(API_BASE_URL + "/phases/current/dataset", params={"tg_chat_id": cid})
-            r.raise_for_status()
+            try:
+                r = await client.get(API_BASE_URL + "/phases/current/dataset", params={"tg_chat_id": cid})
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise BackendError(_extract_backend_error(e.response), e.response.status_code)
+            except httpx.RequestError:
+                raise BackendError("Сервис API недоступен. Проверьте URL и доступность.")
             data = r.content
         await bot.send_document(
             cid,
             types.InputFile(io.BytesIO(data), filename="dataset.csv"),
-            caption=f"Готов для скачивания",
+            caption="Готов для скачивания",
             reply_markup=kb_registered(),
         )
+    except BackendError as e:
+        await bot.send_message(cid, f"Ошибка загрузки датасета: {e.message}", reply_markup=kb_registered())
     except Exception:
-        await bot.send_message(cid, "Ошибка загрузки датасета", reply_markup=kb_registered())
+        await bot.send_message(cid, "Неожиданная ошибка при загрузке датасета", reply_markup=kb_registered())
 
 
-@dispatcher.callback_query_handler(lambda c: c.data == "leaderboard")
+@dispatcher.callback_query_handler(lambda c: c.data == "leaderboard", state='*')
 async def cb_leaderboard(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
@@ -207,14 +310,21 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
                 lines.append(f"{idx:>2}.  {name:<20}  {f1:>6.4f}  {lat:>12.1f}")
             text = "```\n" + "\n".join(lines) + "\n```"
         await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
+    except BackendError as e:
+        await bot.send_message(cid, f"Ошибка получения лидерборда: {e.message}", reply_markup=kb_registered())
     except Exception:
-        await bot.send_message(cid, "Ошибка получения лидерборда", reply_markup=kb_registered())
+        await bot.send_message(cid, "Неожиданная ошибка при получении лидерборда", reply_markup=kb_registered())
 
 
-@dispatcher.callback_query_handler(lambda c: c.data == "change_endpoint")
-async def cb_change_endpoint(callback_query: types.CallbackQuery):
+@dispatcher.callback_query_handler(lambda c: c.data == "change_endpoint", state='*')
+async def cb_change_endpoint(callback_query: types.CallbackQuery, state: FSMContext):
     cid = callback_query.message.chat.id
     await callback_query.answer()
+    # Закрываем любой предыдущий flow перед началом смены URL
+    try:
+        await state.finish()
+    except Exception:
+        pass
     await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host):")
     await ChangeEndpointStates.waiting_endpoint.set()
 
@@ -222,6 +332,10 @@ async def cb_change_endpoint(callback_query: types.CallbackQuery):
 @dispatcher.message_handler(state=ChangeEndpointStates.waiting_endpoint)
 async def st_change_endpoint(message: types.Message, state: FSMContext):
     cid = message.chat.id
+    if not message.text or not isinstance(message.text, str):
+        return await message.reply("Пожалуйста, отправьте URL текстом. Или /cancel для отмены.")
+    if message.text.startswith('/'):
+        return await message.reply("Это похоже на команду. Отправьте URL текстом или используйте /cancel.")
     endpoint = _normalize_endpoint(message.text)
     try:
         team = await api_get(f"/teams/{cid}")
@@ -233,10 +347,26 @@ async def st_change_endpoint(message: types.Message, state: FSMContext):
             f"URL обновлён для команды: {resp['name']}.",
             reply_markup=kb_registered(),
         )
-    except Exception:
-        await message.reply("Не удалось обновить URL", reply_markup=kb_registered())
-    finally:
         await state.finish()
+    except BackendError as e:
+        if e.status in (400, 422):
+            await message.reply(f"Не удалось обновить URL: {e.message}\nВведите корректный URL или /cancel для отмены.")
+            return
+        await message.reply(f"Не удалось обновить URL: {e.message}", reply_markup=kb_registered())
+        await state.finish()
+    except Exception:
+        await message.reply("Неожиданная ошибка при обновлении URL", reply_markup=kb_registered())
+        await state.finish()
+
+
+# --- Cancel handler ---
+@dispatcher.message_handler(commands=["cancel"], state='*')
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    try:
+        await state.finish()
+    except Exception:
+        pass
+    await message.reply("Действие отменено. Выберите действие в меню.", reply_markup=await main_menu_keyboard(message.chat.id))
 
 
 if __name__ == "__main__":
