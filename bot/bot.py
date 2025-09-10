@@ -126,15 +126,22 @@ def kb_unregistered() -> types.InlineKeyboardMarkup:
 
 
 def kb_registered() -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run"),
-        types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result"),
-        types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset"),
-        types.InlineKeyboardButton(text="📤 Загрузить CSV предсказаний", callback_data="upload_csv"),
-        types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard"),
-        types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint"),
-    )
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    btn_run = types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run")
+    btn_download = types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset")
+    btn_upload = types.InlineKeyboardButton(text="📤 Загрузить ответы", callback_data="upload_csv")
+    btn_results = types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result")
+    btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard")
+    btn_change = types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint")
+
+    # 1-й ряд: одна кнопка
+    kb.row(btn_run)
+    # 2-й ряд: две кнопки
+    kb.row(btn_download, btn_upload)
+    # 3-й ряд: две кнопки
+    kb.row(btn_results, btn_lb)
+    # 4-й ряд: одна кнопка
+    kb.row(btn_change)
     return kb
 
 
@@ -363,17 +370,28 @@ async def cb_last_result(callback_query: types.CallbackQuery):
 
     pb_line = None
     if is_active:
-        pb = progress_bar(last.get("samples_success", 0) or 0, last.get("samples_total", 0) or 0)
+        pb = progress_bar(last.get("samples_processed", 0) or 0, last.get("samples_total", 0) or 0)
         if pb:
-            pb_line = f"Доля успешно отработанных: {pb}"
+            pb_line = f"Прогресс: {pb}"
 
     last_f1 = (last.get("f1") if last and cur_status == "done" else None)
     last_lat = (last.get("avg_latency_ms") if last and cur_status == "done" else None)
-    last_block_lines = [
-        "🧪 Последняя отправка:",
-        f"├─ F1: `{fmt_f1(last_f1)}`",
-        f"└─ Latency: `{fmt_lat(last_lat)}`",
-    ]
+    # Добавляем долю успешных в виде succeed/total к результатам
+    if last and cur_status == "done":
+        succ = last.get("samples_success", 0) or 0
+        tot = last.get("samples_total", 0) or 0
+        last_block_lines = [
+            "🧪 Последняя отправка:",
+            f"├─ F1: `{fmt_f1(last_f1)}`",
+            f"├─ Успешно: `{int(succ)}/{int(tot)}`",
+            f"└─ Latency: `{fmt_lat(last_lat)}`",
+        ]
+    else:
+        last_block_lines = [
+            "🧪 Последняя отправка:",
+            f"├─ F1: `{fmt_f1(last_f1)}`",
+            f"└─ Latency: `{fmt_lat(last_lat)}`",
+        ]
 
     lines = [header, "", "📡 Online метрики", ""]
     lines.append(status_line)
