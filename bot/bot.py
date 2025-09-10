@@ -145,6 +145,30 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     return kb
 
 
+def kb_cancel_inline() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow"))
+    return kb
+
+
+def kb_confirm_run() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.row(
+        types.InlineKeyboardButton(text="🚀 Запустить", callback_data="confirm_run"),
+        types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow"),
+    )
+    return kb
+
+
+def kb_confirm_download() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.row(
+        types.InlineKeyboardButton(text="⬇️ Скачать", callback_data="confirm_download_dataset"),
+        types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow"),
+    )
+    return kb
+
+
 async def main_menu_keyboard(chat_id: int) -> types.InlineKeyboardMarkup:
     try:
         _ = await api_get(f"/teams/{chat_id}")
@@ -202,7 +226,7 @@ async def cb_register(callback_query: types.CallbackQuery, state: FSMContext):
         await state.finish()
     except Exception:
         pass
-    await bot.send_message(callback_query.message.chat.id, "Введите название команды:")
+    await bot.send_message(callback_query.message.chat.id, "Введите название команды:\n(или нажмите ❌ Отмена)", reply_markup=kb_cancel_inline())
     await RegisterStates.waiting_team.set()
 
 
@@ -216,7 +240,7 @@ async def st_register_team(message: types.Message, state: FSMContext):
     if not team:
         return await message.reply("Название команды не может быть пустым. Введите ещё раз:")
     await state.update_data(team_name=team)
-    await message.reply("Теперь введите IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host):")
+    await message.reply("Теперь введите IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).\n(или нажмите ❌ Отмена)", reply_markup=kb_cancel_inline())
     await RegisterStates.waiting_endpoint.set()
 
 
@@ -262,6 +286,14 @@ async def cb_run(callback_query: types.CallbackQuery):
         is_registered = False
     if not is_registered:
         return await bot.send_message(cid, "Сначала зарегистрируйте команду.", reply_markup=kb_unregistered())
+    # Подтверждение запуска
+    await bot.send_message(cid, "Запустить оценку сейчас?", reply_markup=kb_confirm_run())
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "confirm_run", state='*')
+async def cb_confirm_run(callback_query: types.CallbackQuery):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
     try:
         data = await api_post("/runs/start", {"tg_chat_id": cid})
         await bot.send_message(cid, f"Запущен тест: run_id={data['run_id']}, status={data['status']}", reply_markup=kb_registered())
@@ -461,6 +493,14 @@ async def cb_last_result(callback_query: types.CallbackQuery):
 async def cb_download_dataset(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
+    # Подтверждение скачивания
+    await bot.send_message(cid, "Скачать текущий датасет?", reply_markup=kb_confirm_download())
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "confirm_download_dataset", state='*')
+async def cb_confirm_download_dataset(callback_query: types.CallbackQuery):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             try:
@@ -494,7 +534,8 @@ async def cb_upload_csv(callback_query: types.CallbackQuery, state: FSMContext):
         pass
     await bot.send_message(
         cid,
-        "Пришлите CSV-файл с вашими предсказаниями (столбец 'annotation', разделитель ';').",
+        "Пришлите CSV-файл с вашими предсказаниями (столбец 'annotation', разделитель ';').\n(или нажмите ❌ Отмена)",
+        reply_markup=kb_cancel_inline(),
     )
     await UploadCSVStates.waiting_file.set()
 
@@ -590,7 +631,7 @@ async def cb_change_endpoint(callback_query: types.CallbackQuery, state: FSMCont
         await state.finish()
     except Exception:
         pass
-    await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host):")
+    await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).\n(или нажмите ❌ Отмена)", reply_markup=kb_cancel_inline())
     await ChangeEndpointStates.waiting_endpoint.set()
 
 
@@ -632,6 +673,20 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     except Exception:
         pass
     await message.reply("Действие отменено. Выберите действие в меню.", reply_markup=await main_menu_keyboard(message.chat.id))
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "cancel_flow", state='*')
+async def cb_cancel_flow(callback_query: types.CallbackQuery, state: FSMContext):
+    cid = callback_query.message.chat.id
+    try:
+        await state.finish()
+    except Exception:
+        pass
+    try:
+        await callback_query.answer("Отменено")
+    except Exception:
+        pass
+    await bot.send_message(cid, "Действие отменено. Выберите действие в меню.", reply_markup=await main_menu_keyboard(cid))
 
 
 if __name__ == "__main__":
