@@ -313,12 +313,11 @@ async def upload_run_csv(
     await db.refresh(run_csv)
 
     s3 = _s3_client()
-    filename = f"{phase.name}_{file.filename}"
-    gold_key = f"{S3_DATASETS_PREFIX}{filename}"
+    gold_key = f"{S3_DATASETS_PREFIX}{phase.dataset_filename}"
     try:
         s3.head_object(Bucket=S3_OFFLINE_BUCKET, Key=gold_key)
     except Exception:
-        local_path = os.path.join(DATASETS_DIR, filename)
+        local_path = os.path.join(DATASETS_DIR, phase.dataset_filename)
         if not os.path.exists(local_path):
             raise HTTPException(status_code=404, detail="Файл датасета не найден для выгрузки в S3")
         with open(local_path, "rb") as f:
