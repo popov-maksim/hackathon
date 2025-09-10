@@ -611,8 +611,8 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
             lines.append("-" * 46)
             for idx, it in enumerate(items, start=1):
                 name = str(it.get('team_name', ''))[:20]
-                f1 = it.get('f1', 0.0) or 0.0
-                lat = it.get('avg_latency_ms', 0.0) or 0.0
+                f1 = it.get('f1', None) or '-'
+                lat = it.get('avg_latency_ms', None) or '-'
                 lines.append(f"{idx:>2}.  {name:<20}  {f1:>6.4f}  {lat:>12.1f}")
             text = "```\n" + "\n".join(lines) + "\n```"
         await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
