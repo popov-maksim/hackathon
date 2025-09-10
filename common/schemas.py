@@ -51,7 +51,7 @@ class RunStatusOut(BaseModel):
 
 class LeaderboardItem(BaseModel):
     team_name: str
-    avg_latency_ms: float
+    avg_latency_ms: float | None = None
     f1: float | None = None
 
 

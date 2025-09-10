@@ -605,7 +605,7 @@ async def leaderboard(phase_id: int | None = None, db: AsyncSession = Depends(ge
         items=[
             LeaderboardItem(
                 team_name=name,
-                avg_latency_ms=float(lat or 0.0),
+                avg_latency_ms=float(lat) if lat is not None else None,
                 f1=float(f1) if f1 is not None else None
             )
             for (name, f1, lat) in rows
