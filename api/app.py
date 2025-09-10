@@ -188,7 +188,7 @@ async def create_competition_phase(
     if phase is not None:
         raise HTTPException(status_code=400, detail="Этап с таким названием уже существует")
 
-    filename = f"{phase.id}_{name}_{file.filename}"
+    filename = f"{name}_{file.filename}"
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Ожидается CSV файл")
 
@@ -293,7 +293,7 @@ async def upload_run_csv(
     await db.refresh(run_csv)
 
     s3 = _s3_client()
-    filename = f"{phase.id}_{phase.name}_{file.filename}"
+    filename = f"{phase.name}_{file.filename}"
     gold_key = f"{S3_DATASETS_PREFIX}{filename}"
     try:
         s3.head_object(Bucket=S3_OFFLINE_BUCKET, Key=gold_key)
