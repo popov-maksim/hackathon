@@ -611,9 +611,12 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
             lines.append("-" * 46)
             for idx, it in enumerate(items, start=1):
                 name = str(it.get('team_name', ''))[:20]
-                f1 = it.get('f1', None) or '-'
-                lat = it.get('avg_latency_ms', None) or '-'
-                lines.append(f"{idx:>2}.  {name:<20}  {f1:>6.4f}  {lat:>12.1f}")
+                f1_val = it.get('f1', None)
+                lat_val = it.get('avg_latency_ms', None)
+                # Render '-' when values are missing, otherwise format numbers
+                f1_str = '-' if f1_val is None else f"{float(f1_val):.4f}"
+                lat_str = '-' if lat_val is None else f"{float(lat_val):.1f}"
+                lines.append(f"{idx:>2}.  {name:<20}  {f1_str:>6}  {lat_str:>12}")
             text = "```\n" + "\n".join(lines) + "\n```"
         await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
     except BackendError as e:
@@ -833,7 +836,10 @@ async def cb_last_csv_result(callback_query: types.CallbackQuery):
         status = str(data.get("status"))
         f1 = data.get("f1")
         if status == "done":
-            msg = f"🧾 Оффлайн оценка: F1 = {float(f1):.4f}"
+            if f1 is not None:
+                msg = f"🧾 Оффлайн оценка: F1 = {float(f1):.4f}"
+            else:
+                msg = "🧾 Оффлайн оценка: F1 = -"
         else:
             msg = "🧾 Оффлайн оценка: выполняется…"
         await bot.send_message(cid, msg, reply_markup=kb_registered())
