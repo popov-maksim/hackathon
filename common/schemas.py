@@ -6,8 +6,8 @@ class RegisterTeamIn(BaseModel):
     tg_chat_id: int
     team_name: str
     # endpoint_url is optional to allow partial updates (e.g., only GitHub)
-    endpoint_url: Optional[AnyHttpUrl] = None
-    github_url: Optional[AnyHttpUrl] = None
+    endpoint_url: AnyHttpUrl | None = None
+    github_url: AnyHttpUrl | None = None
 
 
 class TeamOut(BaseModel):
@@ -45,14 +45,14 @@ class RunStatusOut(BaseModel):
     samples_processed: int
     samples_success: int
     samples_total: int
-    avg_latency_ms: Optional[float] = None
-    f1: Optional[float] = None
+    avg_latency_ms: float | None = None
+    f1: float | None = None
 
 
 class LeaderboardItem(BaseModel):
     team_name: str
     avg_latency_ms: float
-    f1: float
+    f1: float | None = None
 
 
 class LeaderboardOut(BaseModel):
@@ -68,4 +68,4 @@ class RunCSVStartOut(BaseModel):
 class RunCSVStatusOut(BaseModel):
     run_csv_id: int
     status: str
-    f1: Optional[float] = None
+    f1: float | None = None
