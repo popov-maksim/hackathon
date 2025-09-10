@@ -213,7 +213,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         gh = team.get('github_url')
         url_line = f"\nТекущий URL: {url}" if url else ""
         gh_line = f"\nТекущий GitHub: {gh}" if gh else ""
-        text = f"Готово! Команда: {team.get('name')}.{url_line}{gh_line}\nВыберите действие:"
+        text = f"Команда: {team.get('name')}.{url_line}{gh_line}\nВыберите действие:"
         kb = kb_registered()
     except BackendError as e:
         if e.status == 404:
