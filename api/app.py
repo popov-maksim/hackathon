@@ -341,6 +341,25 @@ async def get_last_csv_status(tg_chat_id: int, db: AsyncSession = Depends(get_se
     return RunCSVStatusOut(run_csv_id=last.id, status=status, f1=last.f1, precision=last.precision, recall=last.recall)
 
 
+@app.get("/teams/{tg_chat_id}/best_csv", response_model=RunCSVStatusOut)
+async def get_best_csv_status(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
+    """Лучший оффлайн-результат команды (по максимальному F1)."""
+    team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Команда не найдена")
+    best = (
+        await db.execute(
+            select(RunCSV)
+            .where(RunCSV.team_id == team.id, RunCSV.f1.isnot(None))
+            .order_by(RunCSV.f1.desc(), RunCSV.created_at.asc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if best is None:
+        raise HTTPException(status_code=404, detail="Нет завершённых оффлайн-оценок для команды")
+    return RunCSVStatusOut(run_csv_id=best.id, status="done", f1=best.f1, precision=best.precision, recall=best.recall)
+
+
 @app.post("/runs/start", response_model=StartRunOut)
 async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)):
     """Запустить оценку через Yandex Message Queue и Cloud Functions."""

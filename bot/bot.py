@@ -132,7 +132,6 @@ def kb_registered() -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result"),
         types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset"),
         types.InlineKeyboardButton(text="📤 Загрузить CSV предсказаний", callback_data="upload_csv"),
-        types.InlineKeyboardButton(text="🧾 Оффлайн результат", callback_data="last_csv_result"),
         types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard"),
         types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint"),
     )
@@ -307,24 +306,20 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     except Exception:
         return await bot.send_message(cid, "Неожиданная ошибка при получении данных команды")
 
-    # 2) Последний запуск (а также текущий статус)
+    # 2) Последний онлайн-запуск (а также текущий статус)
     last = None
     try:
         last = await api_get(f"/teams/{cid}/last_run")
     except BackendError as e:
         if e.status == 404:
-            # Вообще не было запусков
-            return await bot.send_message(
-                cid,
-                "📊 *Мои результаты*\n\nПока нет ни одной оценки. 🚀 Запустите проверку — всё получится! 🙂",
-                reply_markup=kb_registered(),
-                parse_mode="Markdown",
-            )
-        return await bot.send_message(cid, f"Ошибка получения результатов: {e.message}", reply_markup=kb_registered())
+            # Вообще не было запусков — покажем блок Online с прочерками
+            last = None
+        else:
+            return await bot.send_message(cid, f"Ошибка получения результатов: {e.message}", reply_markup=kb_registered())
     except Exception:
         return await bot.send_message(cid, "Неожиданная ошибка при получении результатов", reply_markup=kb_registered())
 
-    # 3) Лидерборд — найдём лучшее решение и позицию
+    # 3) Лидерборд — найдём лучшее онлайн‑решение и позицию
     best_block_lines: list[str] = []
     rank_line = ""
     try:
@@ -342,9 +337,9 @@ async def cb_last_result(callback_query: types.CallbackQuery):
             best_f1 = my_item.get('f1')
             best_lat = my_item.get('avg_latency_ms')
             best_block_lines = [
-                "🏅 Лучшее решение (F1):",
-                f"|__ F1: `{fmt_f1(best_f1)}`",
-                f"|__ Latency: `{fmt_lat(best_lat)}`",
+                "🏅 Лучшая отправка:",
+                f"├─ F1: `{fmt_f1(best_f1)}`",
+                f"└─ Latency: `{fmt_lat(best_lat)}`",
             ]
             rank_line = f"Моё место в лидерборде: {my_idx} из {len(items)}"
     except BackendError:
@@ -352,10 +347,11 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     except Exception:
         pass
 
-    # 4) Соберём текст
-    cur_status = str(last.get("status"))
-    is_active = cur_status in ("queued", "running")
+    # 4) Онлайн блок
+    cur_status = str(last.get("status")) if last else ""
+    is_active = (cur_status in ("queued", "running")) if last else False
     header = "📊 *Мои результаты*"
+
     if is_active:
         st = status_map.get(cur_status, cur_status)
         st_emoji = status_emoji.get(cur_status, "ℹ️")
@@ -364,31 +360,81 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     else:
         status_line = "ℹ️ Статус: Сейчас нет активной оценки"
         run_line = None
+
     pb_line = None
     if is_active:
         pb = progress_bar(last.get("samples_success", 0) or 0, last.get("samples_total", 0) or 0)
         if pb:
             pb_line = f"Доля успешно отработанных: {pb}"
 
-    last_f1 = last.get("f1") if cur_status == "done" else None
-    last_lat = last.get("avg_latency_ms") if cur_status == "done" else None
+    last_f1 = (last.get("f1") if last and cur_status == "done" else None)
+    last_lat = (last.get("avg_latency_ms") if last and cur_status == "done" else None)
     last_block_lines = [
         "🧪 Последняя отправка:",
-        f"|__ F1: `{fmt_f1(last_f1)}`",
-        f"|__ Latency: `{fmt_lat(last_lat)}`",
+        f"├─ F1: `{fmt_f1(last_f1)}`",
+        f"└─ Latency: `{fmt_lat(last_lat)}`",
     ]
 
-    lines = [header, ""]
+    lines = [header, "", "📡 Online метрики", ""]
     lines.append(status_line)
     if run_line:
         lines.append(run_line)
     if pb_line:
         lines.append(pb_line)
+    lines.append("")
     lines.extend(last_block_lines)
     if best_block_lines:
+        lines.append("")
         lines.extend(best_block_lines)
     if rank_line:
         lines.append(f"🏆 {rank_line}")
+
+    # 5) Оффлайн блок
+    lines.append("")
+    lines.append("🧾 Offline метрики")
+    lines.append("")
+    offline_status_line = "ℹ️ Статус: Пока нет оффлайн-оценок"
+    offline_last_lines: list[str] = []
+    offline_best_lines: list[str] = []
+
+    try:
+        last_csv = await api_get(f"/teams/{cid}/last_csv")
+        st = str(last_csv.get("status"))
+        if st == "done":
+            offline_status_line = "✅ Статус: Завершено"
+        elif st in ("queued", "running"):
+            offline_status_line = "🔄 Статус: Выполняется"
+        else:
+            offline_status_line = f"ℹ️ Статус: {st}"
+        offline_last_lines = [
+            "🧪 Последняя отправка:",
+            f"└─ F1: `{fmt_f1(last_csv.get('f1'))}`",
+        ]
+    except BackendError as e:
+        if e.status != 404:
+            offline_status_line = f"ℹ️ Статус: {e.message}"
+    except Exception:
+        pass
+
+    try:
+        best_csv = await api_get(f"/teams/{cid}/best_csv")
+        offline_best_lines = [
+            "🏅 Лучшая отправка:",
+            f"└─ F1: `{fmt_f1(best_csv.get('f1'))}`",
+        ]
+    except BackendError:
+        # нет лучших (не было завершённых)
+        pass
+    except Exception:
+        pass
+
+    lines.append(offline_status_line)
+    if offline_last_lines:
+        lines.append("")
+        lines.extend(offline_last_lines)
+    if offline_best_lines:
+        lines.append("")
+        lines.extend(offline_best_lines)
 
     await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered(), parse_mode="Markdown")
 
@@ -457,7 +503,7 @@ async def st_upload_csv_file(message: types.Message, state: FSMContext):
         res = await api_post_multipart("/runs_csv/upload", data=data, files=files)
         await message.reply(
             f"Файл получен. Начинаем оффлайн-оценку. run_csv_id={res.get('run_csv_id')}\n"
-            f"Нажмите '🧾 Оффлайн результат' чтобы посмотреть статус.",
+            f"Откройте '📊 Мои результаты' → Offline метрики, чтобы посмотреть статус.",
             reply_markup=kb_registered(),
         )
         await state.finish()

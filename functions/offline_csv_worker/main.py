@@ -16,6 +16,8 @@ from common.models import RunCSV
 from common.config import (
     S3_ENDPOINT_URL,
     S3_REGION,
+    ACCESS_KEY,
+    SECRET_KEY,
 )
 
 
@@ -50,6 +52,11 @@ def _s3_client():
         "endpoint_url": S3_ENDPOINT_URL,
         "region_name": S3_REGION,
     }
+    if ACCESS_KEY and SECRET_KEY:
+        kwargs.update({
+            "aws_access_key_id": ACCESS_KEY,
+            "aws_secret_access_key": SECRET_KEY,
+        })
     return boto3.client(**kwargs)
 
 

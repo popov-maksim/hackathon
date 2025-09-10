@@ -20,7 +20,7 @@ FN_OFFLINE_CSV_NAME="${FN_OFFLINE_CSV_NAME:-offline-csv-worker}"
 if [[ -f "$ROOT_DIR/.env" ]]; then
   while IFS= read -r line; do
     case "$line" in
-      POSTGRES_USER=*|POSTGRES_PASSWORD=*|POSTGRES_DB=*|POSTGRES_HOST=*|POSTGRES_PORT=*|REQUEST_CONNECT_TIMEOUT=*|REQUEST_READ_TIMEOUT=*|RUN_TIME_LIMIT_SECONDS=*|YMQ_QUEUE_URL=*|YMQ_QUEUE_ARN=*|S3_ENDPOINT_URL=*|S3_REGION=*|S3_OFFLINE_BUCKET=*)
+      POSTGRES_USER=*|POSTGRES_PASSWORD=*|POSTGRES_DB=*|POSTGRES_HOST=*|POSTGRES_PORT=*|REQUEST_CONNECT_TIMEOUT=*|REQUEST_READ_TIMEOUT=*|RUN_TIME_LIMIT_SECONDS=*|YMQ_QUEUE_URL=*|YMQ_QUEUE_ARN=*|S3_ENDPOINT_URL=*|S3_REGION=*|S3_OFFLINE_BUCKET=*|ACCESS_KEY=*|SECRET_KEY=*)
         key="${line%%=*}"
         val="${line#*=}"
         # strip inline comments only if preceded by whitespace (preserves '#' inside values)
@@ -34,7 +34,7 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 # Validate required envs
-req_vars=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES_HOST POSTGRES_PORT REQUEST_CONNECT_TIMEOUT REQUEST_READ_TIMEOUT RUN_TIME_LIMIT_SECONDS S3_ENDPOINT_URL S3_REGION S3_OFFLINE_BUCKET)
+req_vars=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES_HOST POSTGRES_PORT REQUEST_CONNECT_TIMEOUT REQUEST_READ_TIMEOUT RUN_TIME_LIMIT_SECONDS S3_ENDPOINT_URL S3_REGION S3_OFFLINE_BUCKET ACCESS_KEY SECRET_KEY)
 for v in "${req_vars[@]}"; do
   if [[ -z "${!v:-}" ]]; then
     echo "[!] Missing env var: $v" >&2
@@ -102,7 +102,9 @@ yc serverless function version create \
   --environment POSTGRES_HOST="$POSTGRES_HOST" \
   --environment POSTGRES_PORT="$POSTGRES_PORT" \
   --environment S3_ENDPOINT_URL="$S3_ENDPOINT_URL" \
-  --environment S3_OFFLINE_BUCKET="$S3_OFFLINE_BUCKET"
+  --envritonment S3_REGION="$S3_REGION" \
+  --environment ACCESS_KEY="$ACCESS_KEY" \
+  --environment SECRET_KEY="$SECRET_KEY"
 
 echo "[✓] Deployed Cloud Functions."
 
