@@ -138,7 +138,7 @@ async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
     team = result.scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
-    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=team.github_url)
+    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=str(team.github_url))
 
 
 @app.post("/teams/register", response_model=TeamOut)
@@ -155,7 +155,7 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
             tg_chat_id=payload.tg_chat_id,
             name=payload.team_name,
             endpoint_url=str(payload.endpoint_url),
-            github_url=payload.github_url,
+            github_url=str(payload.github_url),
         )
         db.add(team)
         await db.commit()
@@ -165,9 +165,9 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         if payload.endpoint_url is not None:
             team.endpoint_url = str(payload.endpoint_url)
         if payload.github_url is not None:
-            team.github_url = payload.github_url
+            team.github_url = str(payload.github_url)
         await db.commit()
-    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=team.github_url)
+    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=str(team.github_url))
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
@@ -348,41 +348,73 @@ async def upload_run_csv(
 
 
 @app.get("/teams/{tg_chat_id}/last_csv", response_model=RunCSVStatusOut)
-async def get_last_csv_status(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
+async def get_last_csv_status(
+    tg_chat_id: int,
+    phase_id: int | None = None,
+    db: AsyncSession = Depends(get_session),
+):
     team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
 
+    # Определяем этап: указанный или последний созданный
+    if phase_id is None:
+        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Нет этапов")
+        pid = phase.id
+    else:
+        phase = (await db.execute(select(Phase).where(Phase.id == phase_id))).scalar_one_or_none()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Этап не найден")
+        pid = phase.id
+
     last = (
         await db.execute(
             select(RunCSV)
-            .where(RunCSV.team_id == team.id)
+            .where(RunCSV.team_id == team.id, RunCSV.phase_id == pid)
             .order_by(RunCSV.created_at.desc())
             .limit(1)
         )
     ).scalars().first()
     if last is None:
-        raise HTTPException(status_code=404, detail="Нет оффлайн-оценок для команды")
+        raise HTTPException(status_code=404, detail="Нет оффлайн-оценок для команды на этом этапе")
     status = "done" if last.f1 is not None else "running"
     return RunCSVStatusOut(run_csv_id=last.id, status=status, f1=last.f1)
 
 
 @app.get("/teams/{tg_chat_id}/best_csv", response_model=RunCSVStatusOut)
-async def get_best_csv_status(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
+async def get_best_csv_status(
+    tg_chat_id: int,
+    phase_id: int | None = None,
+    db: AsyncSession = Depends(get_session),
+):
     """Лучший оффлайн-результат команды (по максимальному F1)."""
     team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
+    # Определяем этап: указанный или последний
+    if phase_id is None:
+        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Нет этапов")
+        pid = phase.id
+    else:
+        phase = (await db.execute(select(Phase).where(Phase.id == phase_id))).scalar_one_or_none()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Этап не найден")
+        pid = phase.id
+
     best = (
         await db.execute(
             select(RunCSV)
-            .where(RunCSV.team_id == team.id, RunCSV.f1.isnot(None))
+            .where(RunCSV.team_id == team.id, RunCSV.phase_id == pid, RunCSV.f1.isnot(None))
             .order_by(RunCSV.f1.desc(), RunCSV.created_at.asc())
             .limit(1)
         )
     ).scalars().first()
     if best is None:
-        raise HTTPException(status_code=404, detail="Нет завершённых оффлайн-оценок для команды")
+        raise HTTPException(status_code=404, detail="Нет завершённых оффлайн-оценок для команды на этом этапе")
     return RunCSVStatusOut(run_csv_id=best.id, status="done", f1=best.f1)
 
 
@@ -467,21 +499,37 @@ async def run_status(run_id: int, db: AsyncSession = Depends(get_session)):
 
 
 @app.get("/teams/{tg_chat_id}/last_run", response_model=RunStatusOut)
-async def get_last_run_status(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
+async def get_last_run_status(
+    tg_chat_id: int,
+    phase_id: int | None = None,
+    db: AsyncSession = Depends(get_session),
+):
     """Получение статуса последнего запуска командой"""
     team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
 
+    # Определяем этап: указанный или последний
+    if phase_id is None:
+        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Нет этапов")
+        pid = phase.id
+    else:
+        phase = (await db.execute(select(Phase).where(Phase.id == phase_id))).scalar_one_or_none()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Этап не найден")
+        pid = phase.id
+
     last_run_query = (
         select(Run)
-        .where(Run.team_id == team.id)
+        .where(Run.team_id == team.id, Run.phase_id == pid)
         .order_by(Run.created_at.desc())
         .limit(1)
     )
     last_run = (await db.execute(last_run_query)).scalars().first()
     if last_run is None:
-        raise HTTPException(status_code=404, detail="У данной команды еще не было запусков")
+        raise HTTPException(status_code=404, detail="У данной команды ещё не было запусков на этом этапе")
 
     return RunStatusOut(
         run_id=last_run.id,
