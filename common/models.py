@@ -64,6 +64,7 @@ class Run(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     samples_total = Column(Integer, default=0)
+    samples_processed = Column(Integer, default=0)
     samples_success = Column(Integer, default=0)
     avg_latency_ms = Column(Float, nullable=True)
     f1 = Column(Float, nullable=True)

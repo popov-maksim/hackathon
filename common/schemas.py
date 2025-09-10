@@ -39,6 +39,7 @@ class StartRunOut(BaseModel):
 class RunStatusOut(BaseModel):
     run_id: int
     status: str
+    samples_processed: int
     samples_success: int
     samples_total: int
     avg_latency_ms: Optional[float] = None

@@ -174,7 +174,8 @@ async def create_competition_phase(
     n_csv_rows: int | None = Form(None),
     db: AsyncSession = Depends(get_session),
 ):
-    """Создание нового этапа соревнования с загрузкой датасета.
+    """
+    Создание нового этапа соревнования с загрузкой датасета.
 
     Ожидает multipart/form-data:
     - name: str — название этапа (уникально)
@@ -187,7 +188,7 @@ async def create_competition_phase(
     if phase is not None:
         raise HTTPException(status_code=400, detail="Этап с таким названием уже существует")
 
-    filename = file.filename
+    filename = f"{phase.id}_{name}_{file.filename}"
     if not filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Ожидается CSV файл")
 
@@ -292,11 +293,12 @@ async def upload_run_csv(
     await db.refresh(run_csv)
 
     s3 = _s3_client()
-    gold_key = f"{S3_DATASETS_PREFIX}{phase.dataset_filename}"
+    filename = f"{phase.id}_{phase.name}_{file.filename}"
+    gold_key = f"{S3_DATASETS_PREFIX}{filename}"
     try:
         s3.head_object(Bucket=S3_OFFLINE_BUCKET, Key=gold_key)
     except Exception:
-        local_path = os.path.join(DATASETS_DIR, phase.dataset_filename)
+        local_path = os.path.join(DATASETS_DIR, filename)
         if not os.path.exists(local_path):
             raise HTTPException(status_code=404, detail="Файл датасета не найден для выгрузки в S3")
         with open(local_path, "rb") as f:
@@ -387,6 +389,7 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
         status=RunStatus.RUNNING,
         started_at=datetime.now(timezone.utc),
         samples_total=0,
+        samples_processed=0,
         samples_success=0,
     )
     db.add(run)
@@ -419,6 +422,7 @@ async def run_status(run_id: int, db: AsyncSession = Depends(get_session)):
     return RunStatusOut(
         run_id=run.id,
         status=run.status,
+        samples_processed=run.samples_processed,
         samples_success=run.samples_success,
         samples_total=run.samples_total,
         avg_latency_ms=run.avg_latency_ms,
@@ -446,6 +450,7 @@ async def get_last_run_status(tg_chat_id: int, db: AsyncSession = Depends(get_se
     return RunStatusOut(
         run_id=last_run.id,
         status=last_run.status,
+        samples_processed=last_run.samples_processed,
         samples_success=last_run.samples_success,
         samples_total=last_run.samples_total,
         avg_latency_ms=last_run.avg_latency_ms,

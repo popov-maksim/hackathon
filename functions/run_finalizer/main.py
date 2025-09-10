@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from pythonjsonlogger import jsonlogger
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from common.utils import f1_macro

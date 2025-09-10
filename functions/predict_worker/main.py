@@ -6,16 +6,13 @@ import asyncio
 
 import httpx
 from pythonjsonlogger import jsonlogger
-from sqlalchemy import update
+from sqlalchemy import update, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from common.models import Run, Prediction
 from common.utils import normalize_pred
 from common.config import REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT
-
-
-MAX_CONC = int(os.getenv("WORKER_MAX_CONCURRENCY", "10") or 10)
 
 
 class YcLoggingFormatter(jsonlogger.JsonFormatter):
@@ -33,6 +30,8 @@ logger.propagate = False
 logger.addHandler(logHandler)
 logger.setLevel(logging.DEBUG)
 
+
+
 def _db_url() -> str:
     db_user = os.getenv("POSTGRES_USER")
     db_password = os.getenv("POSTGRES_PASSWORD")
@@ -41,11 +40,12 @@ def _db_url() -> str:
     db_port = os.getenv("POSTGRES_PORT")
     return f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
+
 async def _process_message(
     msg: dict,
     *,
-    client: httpx.AsyncClient | None = None,
-    SessionLocal: async_sessionmaker | None = None,
+    client: httpx.AsyncClient,
+    SessionLocal: async_sessionmaker,
 ):
     run_id = int(msg["run_id"])
     endpoint_url = str(msg["endpoint_url"]).rstrip("/")
@@ -53,29 +53,22 @@ async def _process_message(
     sample = str(msg.get("sample", ""))
     gold = msg.get("gold", [])
 
-    timeout = httpx.Timeout(REQUEST_READ_TIMEOUT, connect=REQUEST_CONNECT_TIMEOUT)
     latency_ms = None
     ok = False
     pred_json = None
-    t0 = time.perf_counter()
     try:
-        if client is None:
-            async with httpx.AsyncClient(timeout=timeout) as _client:
-                resp = await _client.post(endpoint_url, json={"input": sample})
-        else:
-            resp = await client.post(endpoint_url, json={"input": sample})
+        t0 = time.perf_counter()
+        resp = await client.post(endpoint_url, json={"input": sample})
+        latency_ms = (time.perf_counter() - t0) * 1000.0
         if resp.status_code == 200:
             data = resp.json()
             pred_json = normalize_pred(data)
             ok = True
-            latency_ms = (time.perf_counter() - t0) * 1000.0
         else:
             logger.info("REQUEST ERROR", extra={'status_code': resp.status_code, 'text': resp.text})
     except Exception as e:
         logger.info("REQUEST ERROR", extra={'error': type(e)})
 
-    # DB session per message, using factory provided for this invocation
-    assert SessionLocal is not None, "SessionLocal must be provided"
     async with SessionLocal() as db:
         async with db.begin():
             pred = Prediction(
@@ -88,6 +81,12 @@ async def _process_message(
             )
             try:
                 db.add(pred)
+
+                await db.execute(
+                    update(Run)
+                    .where(Run.id == run_id)
+                    .values(samples_processed=Run.samples_processed + 1)
+                )
 
                 if ok:
                     await db.execute(
@@ -112,23 +111,22 @@ def handler(event, context):
             messages.append(json.loads(body))
 
     logger.info("MESSAGES", extra={'parsed_messages': messages})
+    logger.info("LENGTH MESSAGES", extra={'length_messages': len(messages)})
 
     async def _run():
-        sem = asyncio.Semaphore(MAX_CONC if MAX_CONC > 0 else 1)
         engine = create_async_engine(
             _db_url(),
             pool_pre_ping=True,
-            pool_size=MAX_CONC if MAX_CONC > 0 else 1,
-            max_overflow=MAX_CONC if MAX_CONC > 0 else 1,
+            pool_size=1,
+            max_overflow=1,
         )
         SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
         try:
             timeout = httpx.Timeout(REQUEST_READ_TIMEOUT, connect=REQUEST_CONNECT_TIMEOUT)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async def _task(m: dict):
-                    async with sem:
-                        await _process_message(m, client=client, SessionLocal=SessionLocal)
-                await asyncio.gather(*[_task(m) for m in messages])
+            limits = httpx.Limits(max_connections=1, max_keepalive_connections=1)
+            async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+                for m in messages:
+                    await _process_message(m, client=client, SessionLocal=SessionLocal)
         finally:
             await engine.dispose()
 
