@@ -1,4 +1,6 @@
 import os
+import asyncio
+import logging
 import io
 import csv
 import json
@@ -53,6 +55,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logger = logging.getLogger(__name__)
+
 def _sqs_client():
     kwargs = {
         "service_name": "sqs",
@@ -83,7 +87,7 @@ def _s3_client():
     return boto3.client(**kwargs)
 
 
-def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
+def _publish_run_messages_sync(team: Team, phase: Phase, run: Run) -> int:
     if not YMQ_QUEUE_URL:
         raise RuntimeError("YMQ_QUEUE_URL is not configured")
 
@@ -122,6 +126,14 @@ def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
     if batch:
         client.send_message_batch(QueueUrl=YMQ_QUEUE_URL, Entries=batch)
     return total
+
+
+async def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
+    """Асинхронная обертка над синхронной публикацией сообщений.
+
+    Выполняет синхронную работу в thread-пуле, чтобы не блокировать event loop.
+    """
+    return await asyncio.to_thread(_publish_run_messages_sync, team, phase, run)
 
 
 @app.get("/health")
@@ -337,13 +349,16 @@ async def upload_run_csv(
         "s3_pred_key": pred_key,
         "s3_gold_key": gold_key,
     }
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(OFFLINE_CF_URL, json=payload)
-            resp.raise_for_status()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Не удалось вызвать функцию оценки для вашего файла: {e}")
+    async def _invoke_offline_cf(data: dict):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(OFFLINE_CF_URL, json=data)
+                resp.raise_for_status()
+        except Exception:
+            logger.exception("OFFLINE_CF invocation failed", extra={"run_csv_id": data.get("run_csv_id")})
 
+    # Запускаем вызов Cloud Function в фоне и сразу отвечаем пользователю
+    asyncio.create_task(_invoke_offline_cf(payload))
     return RunCSVStartOut(run_csv_id=run_csv.id, status="queued")
 
 
@@ -465,7 +480,7 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
     await db.refresh(run)
 
     try:
-        total = _publish_run_messages(team, phase, run)
+        total = await _publish_run_messages(team, phase, run)
     except Exception as e:
         res = await db.execute(select(Run).where(Run.id == run.id))
         r = res.scalar_one()

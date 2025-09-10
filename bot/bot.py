@@ -138,7 +138,7 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     btn_run = types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run")
     btn_download = types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset")
     btn_upload = types.InlineKeyboardButton(text="📤 Отправить ответы", callback_data="upload_csv")
-    btn_results = types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result")
+    btn_results = types.InlineKeyboardButton(text="📊 Результаты команды", callback_data="last_result")
     btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard")
     btn_change = types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint")
     btn_change_github = types.InlineKeyboardButton(text="🔧 Сменить GitHub ссылку", callback_data="change_github")
@@ -237,7 +237,7 @@ async def cb_register(callback_query: types.CallbackQuery, state: FSMContext):
         await state.finish()
     except Exception:
         pass
-    await bot.send_message(callback_query.message.chat.id, "Введите название команды:\n(или нажмите ❌ Отмена)", reply_markup=kb_cancel_inline())
+    await bot.send_message(callback_query.message.chat.id, "Введите название команды:", reply_markup=kb_cancel_inline())
     await RegisterStates.waiting_team.set()
 
 
@@ -251,7 +251,7 @@ async def st_register_team(message: types.Message, state: FSMContext):
     if not team:
         return await message.reply("Название команды не может быть пустым. Введите ещё раз:")
     await state.update_data(team_name=team)
-    await message.reply("Теперь введите IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).\n(или нажмите ❌ Отмена)", reply_markup=kb_cancel_inline())
+    await message.reply("Теперь введите IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).", reply_markup=kb_cancel_inline())
     await RegisterStates.waiting_endpoint.set()
 
 
@@ -394,7 +394,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
                 f"├─ F1: `{fmt_f1(best_f1)}`",
                 f"└─ Latency: `{fmt_lat(best_lat)}`",
             ]
-            rank_line = f"Моё место в лидерборде: {my_idx} из {len(items)}"
+            rank_line = f"Место в лидерборде: {my_idx} из {len(items)}"
     except BackendError:
         pass
     except Exception:
@@ -403,13 +403,13 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     # 4) Онлайн блок
     cur_status = str(last.get("status")) if last else ""
     is_active = (cur_status in ("queued", "running")) if last else False
-    header = "📊 *Мои результаты*"
+    header = "📊 *Результаты команды*"
 
     if is_active:
         st = status_map.get(cur_status, cur_status)
         st_emoji = status_emoji.get(cur_status, "ℹ️")
         status_line = f"{st_emoji} Статус: {st}"
-        run_line = f"Запуск: `run_id={last.get('run_id')}`  `{last.get('samples_success')}/{last.get('samples_total')}`"
+        run_line = f"`run_id={last.get('run_id')}`\nУспешно/Тотал`{last.get('samples_success')}/{last.get('samples_total')}`"
     else:
         status_line = "ℹ️ Статус: Сейчас нет активной оценки"
         run_line = None
@@ -429,7 +429,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         last_block_lines = [
             "🧪 Последняя отправка:",
             f"├─ F1: `{fmt_f1(last_f1)}`",
-            f"├─ Успешно: `{int(succ)}/{int(tot)}`",
+            f"├─ Успешно/Тотал: `{int(succ)}/{int(tot)}`",
             f"└─ Latency: `{fmt_lat(last_lat)}`",
         ]
     else:
@@ -557,7 +557,7 @@ async def cb_upload_csv(callback_query: types.CallbackQuery, state: FSMContext):
         pass
     await bot.send_message(
         cid,
-        "Пришлите CSV-файл с вашими предсказаниями (столбец 'annotation', разделитель ';').\n(или нажмите ❌ Отмена)",
+        "Пришлите CSV-файл с вашими предсказаниями (столбец 'annotation', разделитель ';').",
         reply_markup=kb_cancel_inline(),
     )
     await UploadCSVStates.waiting_file.set()
@@ -584,8 +584,7 @@ async def st_upload_csv_file(message: types.Message, state: FSMContext):
         data = {"tg_chat_id": str(cid)}
         res = await api_post_multipart("/runs_csv/upload", data=data, files=files)
         await message.reply(
-            f"Файл получен. Начинаем оффлайн-оценку. run_csv_id={res.get('run_csv_id')}\n"
-            f"Откройте '📊 Мои результаты' → Offline метрики, чтобы посмотреть статус.",
+            f"Откройте '📊 Результаты команды' → Offline метрики, чтобы посмотреть статус/результаты.",
             reply_markup=kb_registered(),
         )
         await state.finish()
@@ -705,7 +704,7 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
     # 4) Online block
     cur_status = str(last.get("status")) if last else ""
     is_active = (cur_status in ("queued", "running")) if last else False
-    header = "📊 *Мои результаты*"
+    header = "📊 *Результаты команды*"
 
     if is_active:
         st = status_map.get(cur_status, cur_status)
@@ -856,7 +855,7 @@ async def cb_change_endpoint(callback_query: types.CallbackQuery, state: FSMCont
         await state.finish()
     except Exception:
         pass
-    await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).\n(или нажмите ❌ Отмена)", reply_markup=kb_cancel_inline())
+    await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).", reply_markup=kb_cancel_inline())
     await ChangeEndpointStates.waiting_endpoint.set()
 
 
@@ -898,7 +897,7 @@ async def cb_change_github(callback_query: types.CallbackQuery, state: FSMContex
         pass
     await bot.send_message(
         cid,
-        "Введите ссылку на GitHub репозиторий (например, https://github.com/user/repo).\n(или нажмите ❌ Отмена)",
+        "Введите ссылку на GitHub репозиторий (например, https://github.com/user/repo).",
         reply_markup=kb_cancel_inline(),
     )
     await ChangeGithubStates.waiting_github.set()
