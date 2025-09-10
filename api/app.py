@@ -23,9 +23,6 @@ from common.config import (
     YMQ_ENDPOINT_URL,
     YMQ_REGION,
     YMQ_QUEUE_URL,
-    YMQ_ACCESS_KEY,
-    YMQ_SECRET_KEY,
-    YMQ_SESSION_TOKEN,
     SQS_SEND_BATCH_MAX,
     S3_ENDPOINT_URL,
     S3_REGION,
@@ -62,13 +59,11 @@ def _sqs_client():
         "endpoint_url": YMQ_ENDPOINT_URL,
         "region_name": YMQ_REGION,
     }
-    if YMQ_ACCESS_KEY and YMQ_SECRET_KEY:
+    if ACCESS_KEY and SECRET_KEY:
         kwargs.update({
-            "aws_access_key_id": YMQ_ACCESS_KEY,
-            "aws_secret_access_key": YMQ_SECRET_KEY,
+            "aws_access_key_id": ACCESS_KEY,
+            "aws_secret_access_key": SECRET_KEY,
         })
-        if YMQ_SESSION_TOKEN:
-            kwargs["aws_session_token"] = YMQ_SESSION_TOKEN
     return boto3.client(**kwargs)
 
 
@@ -143,7 +138,7 @@ async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
     team = result.scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
-    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url))
+    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=team.github_url)
 
 
 @app.post("/teams/register", response_model=TeamOut)
@@ -156,15 +151,18 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         team = Team(
             tg_chat_id=payload.tg_chat_id,
             name=payload.team_name,
-            endpoint_url=str(payload.endpoint_url)
+            endpoint_url=str(payload.endpoint_url),
+            github_url=payload.github_url,
         )
         db.add(team)
         await db.commit()
         await db.refresh(team)
     else:
         team.endpoint_url = str(payload.endpoint_url)
+        if payload.github_url is not None:
+            team.github_url = payload.github_url
         await db.commit()
-    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url))
+    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=team.github_url)
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
@@ -278,6 +276,28 @@ async def upload_run_csv(
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
 
+    # Запрет параллельных запусков: нельзя запускать оффлайн, если
+    # уже есть активный онлайн-запуск или незавершённая оффлайн-оценка
+    active_run_query = (
+        select(Run)
+        .where(Run.team_id == team.id)
+        .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
+        .limit(1)
+    )
+    if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Нельзя запускать оффлайн-оценку во время активной онлайн-оценки")
+
+    last_csv = (
+        await db.execute(
+            select(RunCSV)
+            .where(RunCSV.team_id == team.id)
+            .order_by(RunCSV.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if last_csv is not None and last_csv.f1 is None:
+        raise HTTPException(status_code=409, detail="У команды уже есть активная оффлайн-оценка")
+
     phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
     if phase is None:
         raise HTTPException(status_code=404, detail="Соревнование не стартовало")
@@ -377,6 +397,18 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
     )
     if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="У команды уже есть активный запуск")
+
+    # Запрет параллельных запусков: нельзя запускать онлайн, если есть незавершённая оффлайн-оценка
+    last_csv = (
+        await db.execute(
+            select(RunCSV)
+            .where(RunCSV.team_id == team.id)
+            .order_by(RunCSV.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if last_csv is not None and last_csv.f1 is None:
+        raise HTTPException(status_code=409, detail="Нельзя запускать онлайн-оценку во время активной оффлайн-оценки")
 
     result = await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))
     phase = result.scalars().first()

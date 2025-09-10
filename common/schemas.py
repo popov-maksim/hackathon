@@ -6,12 +6,14 @@ class RegisterTeamIn(BaseModel):
     tg_chat_id: int
     team_name: str
     endpoint_url: AnyHttpUrl
+    github_url: Optional[AnyHttpUrl] = None
 
 
 class TeamOut(BaseModel):
     team_id: int
     name: str
     endpoint_url: str
+    github_url: Optional[str] = None
 
 
 class CreatePhaseIn(BaseModel):

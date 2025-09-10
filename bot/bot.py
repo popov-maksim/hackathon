@@ -118,6 +118,10 @@ class ChangeEndpointStates(StatesGroup):
     waiting_endpoint = State()
 
 
+class ChangeGithubStates(StatesGroup):
+    waiting_github = State()
+
+
 class UploadCSVStates(StatesGroup):
     waiting_file = State()
 
@@ -133,10 +137,11 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=2)
     btn_run = types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run")
     btn_download = types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset")
-    btn_upload = types.InlineKeyboardButton(text="📤 Загрузить ответы", callback_data="upload_csv")
+    btn_upload = types.InlineKeyboardButton(text="📤 Отправить ответы", callback_data="upload_csv")
     btn_results = types.InlineKeyboardButton(text="📊 Мои результаты", callback_data="last_result")
     btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard")
     btn_change = types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint")
+    btn_change_github = types.InlineKeyboardButton(text="🔧 Сменить GitHub ссылку", callback_data="change_github")
 
     # 1-й ряд: одна кнопка
     kb.row(btn_run)
@@ -144,8 +149,8 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     kb.row(btn_download, btn_upload)
     # 3-й ряд: две кнопки
     kb.row(btn_results, btn_lb)
-    # 4-й ряд: одна кнопка
-    kb.row(btn_change)
+    # 4-й ряд: две кнопки
+    kb.row(btn_change, btn_change_github)
     return kb
 
 
@@ -205,8 +210,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
     try:
         team = await api_get(f"/teams/{cid}")
         url = team.get('endpoint_url')
+        gh = team.get('github_url')
         url_line = f"\nТекущий URL: {url}" if url else ""
-        text = f"Готово! Команда: {team.get('name')}.{url_line}\nВыберите действие:"
+        gh_line = f"\nТекущий GitHub: {gh}" if gh else ""
+        text = f"Готово! Команда: {team.get('name')}.{url_line}{gh_line}\nВыберите действие:"
         kb = kb_registered()
     except BackendError as e:
         if e.status == 404:
@@ -258,7 +265,10 @@ async def st_register_endpoint(message: types.Message, state: FSMContext):
     data = await state.get_data()
     team_name = data.get("team_name")
     try:
-        resp = await api_post("/teams/register", {"tg_chat_id": message.chat.id, "team_name": team_name, "endpoint_url": endpoint})
+        resp = await api_post(
+            "/teams/register",
+            {"tg_chat_id": message.chat.id, "team_name": team_name, "endpoint_url": endpoint},
+        )
         await message.reply(
             f"Регистрация завершена.\nНазвание команды: {resp['name']}\nТекущий URL: {resp.get('endpoint_url', endpoint)}",
             reply_markup=kb_registered()
@@ -526,9 +536,10 @@ async def cb_confirm_download_dataset(callback_query: types.CallbackQuery):
         await bot.send_document(
             cid,
             types.InputFile(io.BytesIO(data), filename="dataset.csv"),
-            caption="Готов для скачивания",
-            reply_markup=kb_registered(),
+            caption="Файл готов для скачивания",
         )
+        # Отправим клавиатуру отдельным текстовым сообщением, чтобы избежать сужения кнопок
+        await bot.send_message(cid, "Выберите действие:", reply_markup=kb_registered())
     except BackendError as e:
         await bot.send_message(cid, f"Ошибка загрузки датасета: {e.message}", reply_markup=kb_registered())
     except Exception:
@@ -873,6 +884,60 @@ async def st_change_endpoint(message: types.Message, state: FSMContext):
             await message.reply(f"Не удалось обновить URL: {e.message}\nВведите корректный URL или /cancel для отмены.")
             return
         await message.reply(f"Не удалось обновить URL: {e.message}", reply_markup=kb_registered())
+        await state.finish()
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "change_github", state='*')
+async def cb_change_github(callback_query: types.CallbackQuery, state: FSMContext):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
+    # Закрываем любой предыдущий flow перед началом смены GitHub ссылки
+    try:
+        await state.finish()
+    except Exception:
+        pass
+    await bot.send_message(
+        cid,
+        "Введите ссылку на GitHub репозиторий (например, https://github.com/user/repo).\n(или нажмите ❌ Отмена)",
+        reply_markup=kb_cancel_inline(),
+    )
+    await ChangeGithubStates.waiting_github.set()
+
+
+@dispatcher.message_handler(state=ChangeGithubStates.waiting_github)
+async def st_change_github(message: types.Message, state: FSMContext):
+    cid = message.chat.id
+    if not message.text or not isinstance(message.text, str):
+        return await message.reply("Пожалуйста, отправьте ссылку текстом. Или /cancel для отмены.")
+    if message.text.startswith('/'):
+        return await message.reply("Это похоже на команду. Отправьте ссылку текстом или используйте /cancel.")
+    gh = message.text.strip()
+    if not (gh.startswith("http://") or gh.startswith("https://")):
+        gh = "https://" + gh
+    try:
+        team = await api_get(f"/teams/{cid}")
+        # Передаём текущий endpoint_url, чтобы не изменить его
+        payload = {
+            "tg_chat_id": cid,
+            "team_name": team["name"],
+            "endpoint_url": team.get("endpoint_url", ""),
+            "github_url": gh,
+        }
+        resp = await api_post("/teams/register", payload)
+        cur_gh = resp.get('github_url', gh)
+        await message.reply(
+            f"Готово. Обновлена GitHub ссылка для команды: {resp['name']}\nТекущий GitHub: {cur_gh}",
+            reply_markup=kb_registered(),
+        )
+        await state.finish()
+    except BackendError as e:
+        if e.status in (400, 422):
+            await message.reply(f"Не удалось обновить GitHub ссылку: {e.message}\nВведите корректную ссылку или /cancel для отмены.")
+            return
+        await message.reply(f"Не удалось обновить GitHub ссылку: {e.message}", reply_markup=kb_registered())
+        await state.finish()
+    except Exception:
+        await message.reply("Неожиданная ошибка при обновлении GitHub ссылки", reply_markup=kb_registered())
         await state.finish()
     except Exception:
         await message.reply("Неожиданная ошибка при обновлении URL", reply_markup=kb_registered())

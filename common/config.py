@@ -16,11 +16,6 @@ YMQ_REGION = os.getenv("YMQ_REGION", "ru-central1")
 YMQ_QUEUE_URL = os.getenv("YMQ_QUEUE_URL", "")  # Full QueueUrl
 YMQ_OFFLINE_QUEUE_URL = os.getenv("YMQ_OFFLINE_QUEUE_URL", "")  # Separate queue for offline CSV scoring
 
-# Optional static credentials (prefer SA/IAM in YC)
-YMQ_ACCESS_KEY = os.getenv("YMQ_ACCESS_KEY", "")
-YMQ_SECRET_KEY = os.getenv("YMQ_SECRET_KEY", "")
-YMQ_SESSION_TOKEN = os.getenv("YMQ_SESSION_TOKEN", "")
-
 # Publish options
 RUN_CHUNK_SIZE = int(os.getenv("RUN_CHUNK_SIZE", "1"))  # 1 = per-sample messages
 SQS_SEND_BATCH_MAX = 10  # SQS/YMQ limit

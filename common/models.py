@@ -1,4 +1,4 @@
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base
 from sqlalchemy import (
     Column,
     Integer,
@@ -29,11 +29,9 @@ class Team(Base):
     tg_chat_id = Column(BigInteger, unique=True, nullable=False)
     name = Column(String(128), unique=True, nullable=False)
     endpoint_url = Column(String(512), nullable=False)
+    github_url = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    runs = relationship("Run", back_populates="team")
-    runs_csv = relationship("RunCSV", back_populates="team")
 
 
 class Phase(Base):
@@ -48,9 +46,6 @@ class Phase(Base):
     n_csv_rows = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    runs = relationship("Run", back_populates="phase")
-    runs_csv = relationship("RunCSV", back_populates="phase")
-
 
 class Run(Base):
     """Таблица со статистикой по запускам с пингом участников"""
@@ -58,8 +53,8 @@ class Run(Base):
     __tablename__ = "runs"
 
     id = Column(Integer, primary_key=True)
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
-    phase_id = Column(Integer, ForeignKey("phases.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    phase_id = Column(Integer, ForeignKey("phases.id", ondelete="CASCADE"), nullable=False)
     status = Column(Enum(RunStatus), default=RunStatus.QUEUED, nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
@@ -70,10 +65,6 @@ class Run(Base):
     f1 = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    team = relationship("Team", back_populates="runs")
-    phase = relationship("Phase", back_populates="runs")
-    predictions = relationship("Prediction", back_populates="run")
-
 
 class Prediction(Base):
     """Таблица с предикшенами для пингов"""
@@ -81,15 +72,13 @@ class Prediction(Base):
     __tablename__ = "predictions"
 
     id = Column(Integer, primary_key=True)
-    run_id = Column(Integer, ForeignKey("runs.id"), nullable=False)
+    run_id = Column(Integer, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
     sample_idx = Column(Integer, nullable=False, default=0)
     latency_ms = Column(Float, nullable=True)
     ok = Column(Boolean, default=False)
     gold_json = Column(JSON, nullable=False)
     pred_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    run = relationship("Run", back_populates="predictions")
 
     __table_args__ = (
         UniqueConstraint("run_id", "sample_idx", name="ux_predictions_run_sample"),
@@ -102,12 +91,7 @@ class RunCSV(Base):
     __tablename__ = "runs_csv"
 
     id = Column(Integer, primary_key=True)
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
-    phase_id = Column(Integer, ForeignKey("phases.id"), nullable=False)
-    precision = Column(Float, nullable=True)
-    recall = Column(Float, nullable=True)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    phase_id = Column(Integer, ForeignKey("phases.id", ondelete="CASCADE"), nullable=False)
     f1 = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    team = relationship("Team", back_populates="runs_csv")
-    phase = relationship("Phase", back_populates="runs_csv")
