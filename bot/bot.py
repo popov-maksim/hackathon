@@ -1,6 +1,7 @@
 import io
 import os
 import logging
+import asyncio
 
 import httpx
 from aiogram import Bot, Dispatcher, executor, types
@@ -16,6 +17,9 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dispatcher = Dispatcher(bot, storage=MemoryStorage())
+
+# Active progress watchers per chat. Prevents duplicate updaters.
+PROGRESS_WATCHERS: dict[int, asyncio.Task] = {}
 
 
 class BackendError(Exception):
@@ -426,7 +430,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         ]
 
     sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    lines = [header, sep, "📡 Online метрики", ""]
+    lines = [header, sep, "_📡 Online метрики_", ""]
     lines.append(status_line)
     if run_line:
         lines.append(run_line)
@@ -443,7 +447,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     # 5) Оффлайн блок
     lines.append("")
     lines.append(sep)
-    lines.append("🧾 Offline метрики")
+    lines.append("🧾 _Offline метрики_")
     lines.append("")
     offline_status_line = "ℹ️ Статус: Пока нет оффлайн-оценок"
     offline_last_lines: list[str] = []
@@ -488,7 +492,13 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         lines.append("")
         lines.extend(offline_best_lines)
 
-    await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered(), parse_mode="Markdown")
+    msg = await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered(), parse_mode="Markdown")
+    # Auto-update progress if running
+    if is_active and pb_line:
+        old = PROGRESS_WATCHERS.get(cid)
+        if old and not old.done():
+            old.cancel()
+        PROGRESS_WATCHERS[cid] = asyncio.create_task(_watch_and_update_results(cid, msg.message_id))
 
 
 @dispatcher.callback_query_handler(lambda c: c.data == "download_dataset", state='*')
@@ -602,6 +612,208 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
         await bot.send_message(cid, "Неожиданная ошибка при получении лидерборда", reply_markup=kb_registered())
 
 
+async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
+    def fmt_f1(v):
+        try:
+            return f"{float(v):.4f}" if v is not None else "—"
+        except Exception:
+            return "—"
+
+    def fmt_lat(v):
+        try:
+            return f"{float(v):.1f} ms" if v is not None else "—"
+        except Exception:
+            return "—"
+
+    def progress_bar(done: int, total: int, width: int = 20) -> str | None:
+        try:
+            td = int(done)
+            tt = int(total)
+        except Exception:
+            return None
+        if tt <= 0:
+            return None
+        ratio = max(0.0, min(1.0, (td / tt)))
+        filled = int(ratio * width)
+        empty = width - filled
+        bar = "█" * filled + "░" * empty
+        percent = int(ratio * 100)
+        return f"[{bar}] {percent}%"
+
+    status_map = {"queued": "В очереди", "running": "Выполняется", "done": "Завершено"}
+    status_emoji = {"queued": "⏳", "running": "🔄", "done": "✅"}
+
+    # 1) Team
+    try:
+        team = await api_get(f"/teams/{cid}")
+    except BackendError as e:
+        if e.status == 404:
+            return ("Сначала зарегистрируйте команду.", False)
+        return (f"Не удалось получить данные команды: {e.message}", False)
+    except Exception:
+        return ("Неожиданная ошибка при получении данных команды", False)
+
+    # 2) Last run
+    try:
+        last = await api_get(f"/teams/{cid}/last_run")
+    except BackendError as e:
+        if e.status == 404:
+            last = None
+        else:
+            return (f"Ошибка получения результатов: {e.message}", False)
+    except Exception:
+        return ("Неожиданная ошибка при получении результатов", False)
+
+    # 3) Leaderboard best and rank
+    best_block_lines: list[str] = []
+    rank_line = ""
+    try:
+        lb = await api_get("/leaderboard")
+        items = lb.get("items", [])
+        my_idx = None
+        my_item = None
+        for idx, it in enumerate(items, start=1):
+            if str(it.get("team_name")) == str(team.get("name")):
+                my_idx = idx
+                my_item = it
+                break
+        if my_item is not None:
+            best_f1 = my_item.get('f1')
+            best_lat = my_item.get('avg_latency_ms')
+            best_block_lines = [
+                "🏅 Лучшая отправка:",
+                f"├─ F1: `{fmt_f1(best_f1)}`",
+                f"└─ Latency: `{fmt_lat(best_lat)}`",
+            ]
+            rank_line = f"Моё место в лидерборде: {my_idx} из {len(items)}"
+    except BackendError:
+        pass
+    except Exception:
+        pass
+
+    # 4) Online block
+    cur_status = str(last.get("status")) if last else ""
+    is_active = (cur_status in ("queued", "running")) if last else False
+    header = "📊 *Мои результаты*"
+
+    if is_active:
+        st = status_map.get(cur_status, cur_status)
+        st_emoji = status_emoji.get(cur_status, "ℹ️")
+        status_line = f"{st_emoji} Статус: {st}"
+        run_line = f"Запуск: `run_id={last.get('run_id')}`  `{last.get('samples_success')}/{last.get('samples_total')}`"
+    else:
+        status_line = "ℹ️ Статус: Сейчас нет активной оценки"
+        run_line = None
+
+    pb_line = None
+    if is_active:
+        pb = progress_bar(last.get("samples_processed", 0) or 0, last.get("samples_total", 0) or 0)
+        if pb:
+            pb_line = f"Прогресс: {pb}"
+
+    last_f1 = (last.get("f1") if last and cur_status == "done" else None)
+    last_lat = (last.get("avg_latency_ms") if last and cur_status == "done" else None)
+    if last and cur_status == "done":
+        succ = last.get("samples_success", 0) or 0
+        tot = last.get("samples_total", 0) or 0
+        last_block_lines = [
+            "🧪 Последняя отправка:",
+            f"├─ F1: `{fmt_f1(last_f1)}`",
+            f"├─ Успешно: `{int(succ)}/{int(tot)}`",
+            f"└─ Latency: `{fmt_lat(last_lat)}`",
+        ]
+    else:
+        last_block_lines = [
+            "🧪 Последняя отправка:",
+            f"├─ F1: `{fmt_f1(last_f1)}`",
+            f"└─ Latency: `{fmt_lat(last_lat)}`",
+        ]
+
+    sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    lines = [header, sep, "_📡 Online метрики_", ""]
+    lines.append(status_line)
+    if run_line:
+        lines.append(run_line)
+    if pb_line:
+        lines.append(pb_line)
+    lines.append("")
+    lines.extend(last_block_lines)
+    if best_block_lines:
+        lines.append("")
+        lines.extend(best_block_lines)
+    if rank_line:
+        lines.append(f"🏆 {rank_line}")
+
+    # 5) Offline block
+    lines.append("")
+    lines.append(sep)
+    lines.append("🧾 _Offline метрики_")
+    lines.append("")
+    offline_status_line = "ℹ️ Статус: Пока нет оффлайн-оценок"
+    offline_last_lines: list[str] = []
+    offline_best_lines: list[str] = []
+
+    try:
+        last_csv = await api_get(f"/teams/{cid}/last_csv")
+        st = str(last_csv.get("status"))
+        if st == "done":
+            offline_status_line = "✅ Статус: Завершено"
+        elif st in ("queued", "running"):
+            offline_status_line = "🔄 Статус: Выполняется"
+        else:
+            offline_status_line = f"ℹ️ Статус: {st}"
+        offline_last_lines = [
+            "🧪 Последняя отправка:",
+            f"└─ F1: `{fmt_f1(last_csv.get('f1'))}`",
+        ]
+    except BackendError as e:
+        if e.status != 404:
+            offline_status_line = f"ℹ️ Статус: {e.message}"
+    except Exception:
+        pass
+
+    try:
+        best_csv = await api_get(f"/teams/{cid}/best_csv")
+        offline_best_lines = [
+            "🏅 Лучшая отправка:",
+            f"└─ F1: `{fmt_f1(best_csv.get('f1'))}`",
+        ]
+    except BackendError:
+        pass
+    except Exception:
+        pass
+
+    lines.append(offline_status_line)
+    if offline_last_lines:
+        lines.append("")
+        lines.extend(offline_last_lines)
+    if offline_best_lines:
+        lines.append("")
+        lines.extend(offline_best_lines)
+
+    text = "\n".join(lines)
+    should_watch = bool(is_active and pb_line)
+    return text, should_watch
+
+
+async def _watch_and_update_results(cid: int, message_id: int):
+    prev_text = None
+    try:
+        for _ in range(180):  # ~6 минут при 2с интервале
+            text, cont = await _build_results_text_and_active(cid)
+            if prev_text != text:
+                try:
+                    await bot.edit_message_text(text, chat_id=cid, message_id=message_id, reply_markup=kb_registered(), parse_mode="Markdown")
+                except Exception:
+                    pass
+                prev_text = text
+            if not cont:
+                break
+            await asyncio.sleep(2.0)
+    finally:
+        task = PROGRESS_WATCHERS.get(cid)
+        if task and task is asyncio.current_task():
+            PROGRESS_WATCHERS.pop(cid, None)
 @dispatcher.callback_query_handler(lambda c: c.data == "last_csv_result", state='*')
 async def cb_last_csv_result(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
