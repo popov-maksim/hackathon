@@ -102,7 +102,7 @@ yc serverless function version create \
   --environment POSTGRES_HOST="$POSTGRES_HOST" \
   --environment POSTGRES_PORT="$POSTGRES_PORT" \
   --environment S3_ENDPOINT_URL="$S3_ENDPOINT_URL" \
-  --envritonment S3_REGION="$S3_REGION" \
+  --environment S3_REGION="$S3_REGION" \
   --environment ACCESS_KEY="$ACCESS_KEY" \
   --environment SECRET_KEY="$SECRET_KEY"
 
