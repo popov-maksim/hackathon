@@ -56,7 +56,7 @@ yc serverless function version create \
   --runtime python311 \
   --entrypoint main.handler \
   --memory 512MB \
-  --execution-timeout 120s \
+  --execution-timeout 600s \
   --network-name default \
   --service-account-id "$YC_SA_ID" \
   --source-path "$BUILD_DIR/predict_worker" \
@@ -75,7 +75,7 @@ yc serverless function version create \
   --runtime python311 \
   --entrypoint main.handler \
   --memory 512MB \
-  --execution-timeout 120s \
+  --execution-timeout 600s \
   --service-account-id "$YC_SA_ID" \
   --source-path "$BUILD_DIR/run_finalizer" \
   --network-name default \
@@ -92,7 +92,7 @@ yc serverless function version create \
   --runtime python311 \
   --entrypoint main.handler \
   --memory 512MB \
-  --execution-timeout 120s \
+  --execution-timeout 600s \
   --service-account-id "$YC_SA_ID" \
   --source-path "$BUILD_DIR/offline_csv_worker" \
   --network-name default \
