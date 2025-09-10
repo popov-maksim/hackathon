@@ -425,7 +425,8 @@ async def cb_last_result(callback_query: types.CallbackQuery):
             f"└─ Latency: `{fmt_lat(last_lat)}`",
         ]
 
-    lines = [header, "", "📡 Online метрики", ""]
+    sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    lines = [header, sep, "📡 Online метрики", ""]
     lines.append(status_line)
     if run_line:
         lines.append(run_line)
@@ -441,6 +442,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
 
     # 5) Оффлайн блок
     lines.append("")
+    lines.append(sep)
     lines.append("🧾 Offline метрики")
     lines.append("")
     offline_status_line = "ℹ️ Статус: Пока нет оффлайн-оценок"
