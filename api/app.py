@@ -306,10 +306,7 @@ async def upload_run_csv(
     s3.put_object(Bucket=S3_OFFLINE_BUCKET, Key=pred_key, Body=pred_bytes, ContentType="text/csv")
 
     payload = {
-        "type": "offline_csv",
         "run_csv_id": run_csv.id,
-        "team_id": team.id,
-        "phase_id": phase.id,
         "s3_bucket": S3_OFFLINE_BUCKET,
         "s3_pred_key": pred_key,
         "s3_gold_key": gold_key,

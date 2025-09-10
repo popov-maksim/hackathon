@@ -16,9 +16,6 @@ from common.models import RunCSV
 from common.config import (
     S3_ENDPOINT_URL,
     S3_REGION,
-    S3_OFFLINE_BUCKET,
-    ACCESS_KEY,
-    SECRET_KEY,
 )
 
 
@@ -53,11 +50,6 @@ def _s3_client():
         "endpoint_url": S3_ENDPOINT_URL,
         "region_name": S3_REGION,
     }
-    if ACCESS_KEY and SECRET_KEY:
-        kwargs.update({
-            "aws_access_key_id": ACCESS_KEY,
-            "aws_secret_access_key": SECRET_KEY,
-        })
     return boto3.client(**kwargs)
 
 
@@ -74,68 +66,63 @@ def _compute_f1_from_s3_bytes(gold_bytes: bytes, pred_bytes: bytes) -> float:
     return float(f1_macro(pairs)) if pairs else 0.0
 
 
-async def _handle_message(m: dict, *, SessionLocal: async_sessionmaker):
-    run_csv_id = int(m.get("run_csv_id"))
-    bucket = str(m.get("s3_bucket"))
-    key_gold = str(m.get("s3_gold_key"))
-    key_pred = str(m.get("s3_pred_key"))
-
-    s3 = _s3_client()
-    gold_obj = s3.get_object(Bucket=bucket, Key=key_gold)
-    pred_obj = s3.get_object(Bucket=bucket, Key=key_pred)
-    gold_bytes = gold_obj["Body"].read()
-    pred_bytes = pred_obj["Body"].read()
-
-    f1_val = _compute_f1_from_s3_bytes(gold_bytes, pred_bytes)
-
-    async with SessionLocal() as db:
-        row = (await db.execute(select(RunCSV).where(RunCSV.id == run_csv_id))).scalar_one_or_none()
-        if row is not None:
-            row.f1 = float(f1_val)
-            await db.commit()
-
-
 def handler(event, context):
     """
     HTTP-триггер для оценки CSV в оффлайн режиме.
 
     Ожидает JSON тело:
     {
-      "type": "offline_csv",
       "run_csv_id": int,
       "s3_bucket": str,
-      "s3_gold_key": str,
       "s3_pred_key": str,
-      ...
+      "s3_gold_key": str,
     }
     """
     logger.info("EVENT", extra=event)
 
-    # try:
-    #     body = event.get("body") if isinstance(event, dict) else None
-    #     if body and event.get("isBase64Encoded"):
-    #         body = base64.b64decode(body).decode("utf-8")
-    #     payload = json.loads(body or "{}")
-    # except Exception as e:
-    #     logger.error("BAD_REQUEST", extra={"error": str(e)})
-    #     return {"statusCode": 400, "body": json.dumps({"error": "invalid json"})}
+    try:
+        body = event.get("body") if isinstance(event, dict) else None
+        if body and event.get("isBase64Encoded"):
+            body = base64.b64decode(body).decode("utf-8")
+        payload = json.loads(body or "{}")
+        logger.info("PAYLOAD", extra=payload)
+    except Exception as e:
+        logger.error("BAD_REQUEST", extra={"error": str(e)})
+        return {"statusCode": 400, "body": json.dumps({"error": "invalid json"})}
 
-    # async def _run_one(m: dict):
-    #     engine = create_async_engine(
-    #         _db_url(),
-    #         pool_pre_ping=True,
-    #         pool_size=1,
-    #         max_overflow=1,
-    #     )
-    #     SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-    #     try:
-    #         await _handle_message(m, SessionLocal=SessionLocal)
-    #     finally:
-    #         await engine.dispose()
+    async def _run(m: dict):
+        engine = create_async_engine(
+            _db_url(),
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=1,
+        )
+        SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            run_csv_id = int(m.get("run_csv_id"))
+            bucket = str(m.get("s3_bucket"))
+            key_gold = str(m.get("s3_gold_key"))
+            key_pred = str(m.get("s3_pred_key"))
 
-    # try:
-    #     asyncio.run(_run_one(payload))
-    #     return {"statusCode": 200, "headers": {"content-type": "application/json"}, "body": json.dumps({"processed": 1})}
-    # except Exception as e:
-    #     logger.error("PROCESS_ERROR", extra={"error": str(e), "payload": payload})
-    #     return {"statusCode": 500, "headers": {"content-type": "application/json"}, "body": json.dumps({"error": "processing failed"})}
+            s3 = _s3_client()
+            gold_obj = s3.get_object(Bucket=bucket, Key=key_gold)
+            pred_obj = s3.get_object(Bucket=bucket, Key=key_pred)
+            gold_bytes = gold_obj["Body"].read()
+            pred_bytes = pred_obj["Body"].read()
+
+            f1_val = _compute_f1_from_s3_bytes(gold_bytes, pred_bytes)
+
+            async with SessionLocal() as db:
+                row = (await db.execute(select(RunCSV).where(RunCSV.id == run_csv_id))).scalar_one_or_none()
+                if row is not None:
+                    row.f1 = float(f1_val)
+                    await db.commit()
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run(payload))
+        return {"statusCode": 200, "headers": {"content-type": "application/json"}, "body": json.dumps({"processed": 1})}
+    except Exception as e:
+        logger.error("PROCESS_ERROR", extra={"error": str(e), "payload": payload})
+        return {"statusCode": 500, "headers": {"content-type": "application/json"}, "body": json.dumps({"error": "processing failed"})}
