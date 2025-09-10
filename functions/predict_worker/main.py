@@ -99,8 +99,8 @@ async def _process_message(
     try:
         t0 = time.perf_counter()
         resp = await client.post(endpoint_url, json={"input": sample})
-        latency_ms = (time.perf_counter() - t0) * 1000.0
         if resp.status_code == 200:
+            latency_ms = (time.perf_counter() - t0) * 1000.0
             data = resp.json()
             pred_json = normalize_pred(data)
             ok = True

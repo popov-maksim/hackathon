@@ -5,7 +5,8 @@ from typing import List, Optional
 class RegisterTeamIn(BaseModel):
     tg_chat_id: int
     team_name: str
-    endpoint_url: AnyHttpUrl
+    # endpoint_url is optional to allow partial updates (e.g., only GitHub)
+    endpoint_url: Optional[AnyHttpUrl] = None
     github_url: Optional[AnyHttpUrl] = None
 
 

@@ -5,6 +5,7 @@ import json
 import base64
 import logging
 import asyncio
+from itertools import zip_longest
 
 import boto3
 from pythonjsonlogger import jsonlogger
@@ -66,10 +67,11 @@ def _compute_f1_from_s3_bytes(gold_bytes: bytes, pred_bytes: bytes) -> float:
     gold_reader = csv.DictReader(io.StringIO(gold_text), delimiter=';')
     pred_reader = csv.DictReader(io.StringIO(pred_text), delimiter=';')
     pairs = []
-    for gold_row, pred_row in zip(gold_reader, pred_reader):
+    for gold_row, pred_row in zip_longest(gold_reader, pred_reader):
         g = parse_annotation_literal((gold_row or {}).get("annotation", ""))
         p = parse_annotation_literal((pred_row or {}).get("annotation", ""))
         pairs.append((g, p))
+    logger.info("PAIRS", extra={"pairs": pairs})
     return float(f1_macro(pairs)) if pairs else 0.0
 
 

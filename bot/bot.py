@@ -939,9 +939,6 @@ async def st_change_github(message: types.Message, state: FSMContext):
     except Exception:
         await message.reply("Неожиданная ошибка при обновлении GitHub ссылки", reply_markup=kb_registered())
         await state.finish()
-    except Exception:
-        await message.reply("Неожиданная ошибка при обновлении URL", reply_markup=kb_registered())
-        await state.finish()
 
 
 # --- Cancel handler ---

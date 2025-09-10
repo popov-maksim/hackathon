@@ -148,6 +148,9 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
     result = await db.execute(query)
     team = result.scalar_one_or_none()
     if team is None:
+        # For initial registration, endpoint_url must be provided
+        if payload.endpoint_url is None:
+            raise HTTPException(status_code=400, detail="endpoint_url is required for registration")
         team = Team(
             tg_chat_id=payload.tg_chat_id,
             name=payload.team_name,
@@ -158,7 +161,9 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         await db.commit()
         await db.refresh(team)
     else:
-        team.endpoint_url = str(payload.endpoint_url)
+        # Partial update: change only provided fields
+        if payload.endpoint_url is not None:
+            team.endpoint_url = str(payload.endpoint_url)
         if payload.github_url is not None:
             team.github_url = payload.github_url
         await db.commit()
