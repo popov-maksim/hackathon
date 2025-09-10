@@ -68,5 +68,3 @@ class RunCSVStatusOut(BaseModel):
     run_csv_id: int
     status: str
     f1: Optional[float] = None
-    precision: Optional[float] = None
-    recall: Optional[float] = None

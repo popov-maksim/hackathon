@@ -307,7 +307,7 @@ async def upload_run_csv(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}")
 
-    run_csv = RunCSV(team_id=team.id, phase_id=phase.id, precision=None, recall=None, f1=None)
+    run_csv = RunCSV(team_id=team.id, phase_id=phase.id, f1=None)
     db.add(run_csv)
     await db.commit()
     await db.refresh(run_csv)
@@ -360,7 +360,7 @@ async def get_last_csv_status(tg_chat_id: int, db: AsyncSession = Depends(get_se
     if last is None:
         raise HTTPException(status_code=404, detail="Нет оффлайн-оценок для команды")
     status = "done" if last.f1 is not None else "running"
-    return RunCSVStatusOut(run_csv_id=last.id, status=status, f1=last.f1, precision=last.precision, recall=last.recall)
+    return RunCSVStatusOut(run_csv_id=last.id, status=status, f1=last.f1)
 
 
 @app.get("/teams/{tg_chat_id}/best_csv", response_model=RunCSVStatusOut)
@@ -379,7 +379,7 @@ async def get_best_csv_status(tg_chat_id: int, db: AsyncSession = Depends(get_se
     ).scalars().first()
     if best is None:
         raise HTTPException(status_code=404, detail="Нет завершённых оффлайн-оценок для команды")
-    return RunCSVStatusOut(run_csv_id=best.id, status="done", f1=best.f1, precision=best.precision, recall=best.recall)
+    return RunCSVStatusOut(run_csv_id=best.id, status="done", f1=best.f1)
 
 
 @app.post("/runs/start", response_model=StartRunOut)
