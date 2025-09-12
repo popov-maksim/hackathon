@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 import boto3
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import httpx
 from sqlalchemy import select, func
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
@@ -176,6 +176,25 @@ async def _call_predict_cf_http(team: Team, run: Run, items: list[dict]) -> None
         resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
         if resp.status_code != 200:
             raise RuntimeError(f"predict_worker HTTP error: {resp.status_code} {resp.text}")
+
+
+async def _spawn_predict_cf_http(team: Team, run_id: int, items: list[dict]) -> None:
+    """Фоновый запуск predict_worker по HTTP без ожидания ответа."""
+    try:
+        class _Run:
+            def __init__(self, id: int):
+                self.id = id
+        await _call_predict_cf_http(team, _Run(run_id), items)
+    except Exception as e:
+        logger.error("PREDICT_HTTP_ERROR", extra={"run_id": run_id, "error": str(e)})
+        # Попробуем пометить ран как QUEUED, чтобы пользователь мог перезапустить
+        SessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
+        async with SessionLocal() as db:
+            res = await db.execute(select(Run).where(Run.id == run_id))
+            r = res.scalar_one_or_none()
+            if r is not None and r.status == RunStatus.RUNNING:
+                r.status = RunStatus.QUEUED
+                await db.commit()
 
 
 async def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
@@ -538,16 +557,15 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
         r = res.scalar_one()
         r.samples_total = len(items)
         await db.commit()
-
-        # Вызов напрямую по HTTP, минуя очередь
-        await _call_predict_cf_http(team, run, items)
     except Exception as e:
-        pass
-        # res = await db.execute(select(Run).where(Run.id == run.id))
-        # r = res.scalar_one()
-        # r.status = RunStatus.QUEUED
-        # await db.commit()
-        # raise HTTPException(status_code=500, detail=f"Не удалось вызвать predict_worker: {e}")
+        res = await db.execute(select(Run).where(Run.id == run.id))
+        r = res.scalar_one()
+        r.status = RunStatus.QUEUED
+        await db.commit()
+        raise HTTPException(status_code=500, detail=f"Не удалось подготовить запуск: {e}")
+
+    # Запускаем HTTP-вызов функции в фоне, не дожидаясь ответа
+    asyncio.create_task(_spawn_predict_cf_http(team, run.id, items))
 
     return StartRunOut(run_id=run.id, status=run.status)
 
