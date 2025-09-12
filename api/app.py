@@ -87,57 +87,6 @@ def _s3_client():
     return boto3.client(**kwargs)
 
 
-def _publish_run_messages_sync(team: Team, phase: Phase, run: Run) -> int:
-    """
-    Публикуем все строки датасета одним сообщением в очередь.
-
-    В сообщении тело формата:
-    {
-      "run_id": int,
-      "team_id": int,
-      "endpoint_url": str,
-      "items": [
-         {"sample_idx": int, "sample": str, "gold": List[Dict] }, ...
-      ]
-    }
-    """
-    if not YMQ_QUEUE_URL:
-        raise RuntimeError("YMQ_QUEUE_URL is not configured")
-
-    dataset_path = f"{DATASETS_DIR}/{phase.dataset_filename}"
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError("Dataset file not found")
-
-    rows_limit = phase.n_csv_rows
-    items = []
-    with open(dataset_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f, delimiter=";")
-        for idx, row in enumerate(reader):
-            if rows_limit is not None and idx >= rows_limit:
-                break
-            sample = row.get("sample", "")
-            gold = parse_annotation_literal(row.get("annotation", ""))
-            items.append({
-                "sample_idx": idx,
-                "sample": sample,
-                "gold": gold,
-            })
-
-    total = len(items)
-
-    client = _sqs_client()
-    body = json.dumps({
-        "run_id": run.id,
-        "team_id": team.id,
-        "endpoint_url": team.endpoint_url,
-        "items": items,
-    }, ensure_ascii=False)
-
-    # Отправляем одним сообщением
-    client.send_message(QueueUrl=YMQ_QUEUE_URL, MessageBody=body)
-    return total
-
-
 # Временный хардкод URL для HTTP-вызова predict_worker, минуя очередь
 PREDICT_CF_URL = "http://localhost:8081"  # замените на реальный публичный URL функции
 
@@ -162,47 +111,6 @@ async def _build_run_items(phase: Phase) -> list[dict]:
         return items
 
     return await asyncio.to_thread(_read_sync)
-
-
-async def _call_predict_cf_http(team: Team, run: Run, items: list[dict]) -> None:
-    payload = {
-        "run_id": run.id,
-        "team_id": team.id,
-        "endpoint_url": team.endpoint_url,
-        "items": items,
-    }
-    timeout = httpx.Timeout(1800.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"predict_worker HTTP error: {resp.status_code} {resp.text}")
-
-
-async def _spawn_predict_cf_http(team: Team, run_id: int, items: list[dict]) -> None:
-    """Фоновый запуск predict_worker по HTTP без ожидания ответа."""
-    try:
-        class _Run:
-            def __init__(self, id: int):
-                self.id = id
-        await _call_predict_cf_http(team, _Run(run_id), items)
-    except Exception as e:
-        logger.error("PREDICT_HTTP_ERROR", extra={"run_id": run_id, "error": str(e)})
-        # Попробуем пометить ран как QUEUED, чтобы пользователь мог перезапустить
-        SessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
-        async with SessionLocal() as db:
-            res = await db.execute(select(Run).where(Run.id == run_id))
-            r = res.scalar_one_or_none()
-            if r is not None and r.status == RunStatus.RUNNING:
-                r.status = RunStatus.QUEUED
-                await db.commit()
-
-
-async def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
-    """Асинхронная обертка над синхронной публикацией сообщений.
-
-    Выполняет синхронную работу в thread-пуле, чтобы не блокировать event loop.
-    """
-    return await asyncio.to_thread(_publish_run_messages_sync, team, phase, run)
 
 
 @app.get("/health")
@@ -558,14 +466,29 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
         r.samples_total = len(items)
         await db.commit()
     except Exception as e:
-        res = await db.execute(select(Run).where(Run.id == run.id))
-        r = res.scalar_one()
-        r.status = RunStatus.QUEUED
-        await db.commit()
-        raise HTTPException(status_code=500, detail=f"Не удалось подготовить запуск: {e}")
+        pass
+        # res = await db.execute(select(Run).where(Run.id == run.id))
+        # r = res.scalar_one()
+        # r.status = RunStatus.QUEUED
+        # await db.commit()
+        # raise HTTPException(status_code=500, detail=f"Не удалось подготовить запуск: {e}")
+
+    async def _call_predict_cf_http(team: Team, run: Run, items: list[dict]) -> None:
+        payload = {
+            "run_id": run.id,
+            "team_id": team.id,
+            "endpoint_url": team.endpoint_url,
+            "items": items,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
+                resp.raise_for_status()
+        except Exception as e:
+            raise RuntimeError(f"predict_worker HTTP error: {e}")
 
     # Запускаем HTTP-вызов функции в фоне, не дожидаясь ответа
-    asyncio.create_task(_spawn_predict_cf_http(team, run.id, items))
+    asyncio.create_task(_call_predict_cf_http(team, run, items))
 
     return StartRunOut(run_id=run.id, status=run.status)
 
