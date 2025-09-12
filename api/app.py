@@ -480,12 +480,8 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
             "endpoint_url": team.endpoint_url,
             "items": items,
         }
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
-                resp.raise_for_status()
-        except Exception as e:
-            raise RuntimeError(f"predict_worker HTTP error: {e}")
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
 
     # Запускаем HTTP-вызов функции в фоне, не дожидаясь ответа
     asyncio.create_task(_call_predict_cf_http(team, run, items))
