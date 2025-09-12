@@ -88,21 +88,28 @@ def _s3_client():
 
 
 def _publish_run_messages_sync(team: Team, phase: Phase, run: Run) -> int:
+    """
+    Публикуем все строки датасета одним сообщением в очередь.
+
+    В сообщении тело формата:
+    {
+      "run_id": int,
+      "team_id": int,
+      "endpoint_url": str,
+      "items": [
+         {"sample_idx": int, "sample": str, "gold": List[Dict] }, ...
+      ]
+    }
+    """
     if not YMQ_QUEUE_URL:
         raise RuntimeError("YMQ_QUEUE_URL is not configured")
 
     dataset_path = f"{DATASETS_DIR}/{phase.dataset_filename}"
-
     if not os.path.exists(dataset_path):
         raise FileNotFoundError("Dataset file not found")
 
-    client = _sqs_client()
-
-    total = 0
-    batch = []
-
     rows_limit = phase.n_csv_rows
-
+    items = []
     with open(dataset_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=";")
         for idx, row in enumerate(reader):
@@ -110,22 +117,65 @@ def _publish_run_messages_sync(team: Team, phase: Phase, run: Run) -> int:
                 break
             sample = row.get("sample", "")
             gold = parse_annotation_literal(row.get("annotation", ""))
-            body = json.dumps({
-                "run_id": run.id,
-                "team_id": team.id,
-                "endpoint_url": team.endpoint_url,
+            items.append({
                 "sample_idx": idx,
                 "sample": sample,
                 "gold": gold,
-            }, ensure_ascii=False)
-            batch.append({"Id": f"{run.id}-{idx}", "MessageBody": body})
-            total += 1
-            if len(batch) >= SQS_SEND_BATCH_MAX:
-                client.send_message_batch(QueueUrl=YMQ_QUEUE_URL, Entries=batch)
-                batch.clear()
-    if batch:
-        client.send_message_batch(QueueUrl=YMQ_QUEUE_URL, Entries=batch)
+            })
+
+    total = len(items)
+
+    client = _sqs_client()
+    body = json.dumps({
+        "run_id": run.id,
+        "team_id": team.id,
+        "endpoint_url": team.endpoint_url,
+        "items": items,
+    }, ensure_ascii=False)
+
+    # Отправляем одним сообщением
+    client.send_message(QueueUrl=YMQ_QUEUE_URL, MessageBody=body)
     return total
+
+
+# Временный хардкод URL для HTTP-вызова predict_worker, минуя очередь
+PREDICT_CF_URL = "http://localhost:8081"  # замените на реальный публичный URL функции
+
+
+async def _build_run_items(phase: Phase) -> list[dict]:
+    """Асинхронно собирает элементы запуска из CSV (в thread-пуле)."""
+    dataset_path = f"{DATASETS_DIR}/{phase.dataset_filename}"
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError("Dataset file not found")
+    rows_limit = phase.n_csv_rows
+
+    def _read_sync() -> list[dict]:
+        items: list[dict] = []
+        with open(dataset_path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f, delimiter=";")
+            for idx, row in enumerate(reader):
+                if rows_limit is not None and idx >= rows_limit:
+                    break
+                sample = row.get("sample", "")
+                gold = parse_annotation_literal(row.get("annotation", ""))
+                items.append({"sample_idx": idx, "sample": sample, "gold": gold})
+        return items
+
+    return await asyncio.to_thread(_read_sync)
+
+
+async def _call_predict_cf_http(team: Team, run: Run, items: list[dict]) -> None:
+    payload = {
+        "run_id": run.id,
+        "team_id": team.id,
+        "endpoint_url": team.endpoint_url,
+        "items": items,
+    }
+    timeout = httpx.Timeout(1800.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
+        if resp.status_code != 200:
+            raise RuntimeError(f"predict_worker HTTP error: {resp.status_code} {resp.text}")
 
 
 async def _publish_run_messages(team: Team, phase: Phase, run: Run) -> int:
@@ -480,18 +530,24 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
     await db.refresh(run)
 
     try:
-        total = await _publish_run_messages(team, phase, run)
-    except Exception as e:
+        # Сформировать весь набор элементов заранее, чтобы записать samples_total до запуска CF
+        items = await _build_run_items(phase)
+
+        # Фиксируем общее количество заранее — это требуется для корректной финализации в predict_worker
         res = await db.execute(select(Run).where(Run.id == run.id))
         r = res.scalar_one()
-        r.status = RunStatus.QUEUED
+        r.samples_total = len(items)
         await db.commit()
-        raise HTTPException(status_code=500, detail=f"Не удалось поставить задачи в очередь: {e}")
 
-    res = await db.execute(select(Run).where(Run.id == run.id))
-    r = res.scalar_one()
-    r.samples_total = total
-    await db.commit()
+        # Вызов напрямую по HTTP, минуя очередь
+        await _call_predict_cf_http(team, run, items)
+    except Exception as e:
+        pass
+        # res = await db.execute(select(Run).where(Run.id == run.id))
+        # r = res.scalar_one()
+        # r.status = RunStatus.QUEUED
+        # await db.commit()
+        # raise HTTPException(status_code=500, detail=f"Не удалось вызвать predict_worker: {e}")
 
     return StartRunOut(run_id=run.id, status=run.status)
 
