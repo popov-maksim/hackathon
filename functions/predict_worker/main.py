@@ -1,14 +1,15 @@
+import math
 import os
 import json
 import time
-import base64
-import random
 import logging
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-import httpx
+import aiohttp
+import stamina
+import numpy as np
 from pythonjsonlogger import jsonlogger
 from sqlalchemy import update, select, and_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -22,6 +23,12 @@ from common.config import REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT
 
 CONCURRENCY = int(os.getenv("CONCURRENCY", "100"))
 RETRIES = int(os.getenv("RETRIES", "2"))
+db_user = os.getenv("POSTGRES_USER")
+db_password = os.getenv("POSTGRES_PASSWORD")
+db_name = os.getenv("POSTGRES_DB")
+db_host = os.getenv("POSTGRES_HOST")
+db_port = os.getenv("POSTGRES_PORT")
+async_dsn = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 
 class YcLoggingFormatter(jsonlogger.JsonFormatter):
@@ -38,15 +45,6 @@ logger = logging.getLogger(__name__)
 logger.propagate = False
 logger.addHandler(logHandler)
 logger.setLevel(logging.DEBUG)
-
-
-def _db_url() -> str:
-    db_user = os.getenv("POSTGRES_USER")
-    db_password = os.getenv("POSTGRES_PASSWORD")
-    db_name = os.getenv("POSTGRES_DB")
-    db_host = os.getenv("POSTGRES_HOST")
-    db_port = os.getenv("POSTGRES_PORT")
-    return f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 
 async def _finalize_run(*, SessionLocal: async_sessionmaker, run_id: int, predictions: List[Dict[str, Any]]) -> None:
@@ -82,7 +80,7 @@ async def _finalize_run(*, SessionLocal: async_sessionmaker, run_id: int, predic
                 update(Run)
                 .where(Run.id == run_id)
                 .values(
-                    avg_latency_ms=(sum(latencies) / len(latencies)) if latencies else None,
+                    avg_latency_ms=float(np.median(latencies)) if latencies else None,
                     f1=f1_macro(pairs) if pairs else 0.0,
                     finished_at=now,
                     status=RunStatus.DONE,
@@ -92,65 +90,74 @@ async def _finalize_run(*, SessionLocal: async_sessionmaker, run_id: int, predic
             )
 
 
-def _safe_jsonable(x):
+@stamina.retry(on=Exception, attempts=2)
+async def make_request(session: aiohttp.ClientSession, url: str, data: dict) -> tuple[bool, float, str]:
+    """
+    :return: [успешный ли ответ, время в мс, текст тела ответа]
+    """
+    logger.info("making request")
+    start_time = time.perf_counter_ns()
     try:
-        json.dumps(x)
-        return x
-    except Exception:
-        return str(x)
-
-
-async def _post_with_retries(client, url, payload):
-    delay = 0.05
-    for attempt in range(RETRIES + 1):
-        try:
-            return await client.post(url, json=payload)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
-            if attempt == RETRIES:
-                raise
-            await asyncio.sleep(delay + random.random() * delay)
-            delay *= 2
-
-
-async def _process_message(msg: dict, *, client: httpx.AsyncClient) -> Dict[str, Any]:
-    run_id = int(msg["run_id"])
-    endpoint_url = str(msg["endpoint_url"]).rstrip("/")
-    sample_idx = int(msg["sample_idx"])
-    sample = str(msg.get("sample", ""))
-    gold = msg.get("gold", [])
-
-    latency_ms = None
-    ok = False
-    pred_json = None
-
-    t_0 = time.perf_counter_ns()
-    try:
-        resp = await _post_with_retries(client, endpoint_url, {"input": sample})
-        t_1 = time.perf_counter_ns()
-        if resp.status_code == 200:
-            data = resp.json()
-            pred_json = normalize_pred(data)
-            ok = True
-        else:
-            logger.info("REQUEST STATUS", extra={'status_code': resp.status_code, 'text': resp.text[:1000]})
+        async with session.post(url, json=data) as response:
+            end_time = time.perf_counter_ns()
+            is_passed = False
+            if response.status == 200:
+                text = await response.text()
+                is_passed = True
+                logger.info("response", extra={'text': text})
+            logger.info("status", extra={'status': response.status})
+            return is_passed, (end_time - start_time) / 1e6, text
     except Exception as e:
-        t_1 = time.perf_counter_ns()
-        logger.info("REQUEST ERROR", extra={'error': type(e).__name__, 'str': f'{e}'})
+        logger.error("ERROR REQUEST", extra={'error': str(e)})
+        raise e
+        # end_time = time.perf_counter_ns()
+        # return False, (end_time - start_time) / 1e6, f"error: {e}"
 
-    latency_ms = (t_1 - t_0) / 1e6
 
-    logger.info("done processing message", extra={
-        'run_id': run_id, 'sample_idx': sample_idx, 'latency_ms': latency_ms,
-        'ok': ok, 'gold_json': _safe_jsonable(gold), 'pred_json': _safe_jsonable(pred_json)})
+async def _run(run_id: int, messages: list[dict[str, str]]):
+    try:
+        data_to_save = []
+        groups_count = math.ceil(len(messages) / CONCURRENCY)
 
-    return {
-        "run_id": run_id,
-        "sample_idx": sample_idx,
-        "latency_ms": latency_ms,
-        "ok": ok,
-        "gold_json": gold,
-        "pred_json": pred_json,
-    }
+        for group_number in range(groups_count):
+            logger.info(f"Handling group {group_number+1}/{groups_count}", extra={'run_id': run_id})
+
+            start_index = group_number * CONCURRENCY
+            end_index = start_index + CONCURRENCY
+            current_messages = messages[start_index: end_index]
+
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as aiohttp_client:
+                tasks = [
+                    make_request(
+                        aiohttp_client,
+                        msg["endpoint_url"],
+                        {"input": msg["sample"]}
+                    ) for msg in current_messages
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for ((is_passed, latency, response_body), msg) in zip(results, current_messages):
+                data_to_save.append({
+                    "run_id": run_id,
+                    "sample_idx": int(msg["sample_idx"]),
+                    "latency_ms": latency if is_passed else None,
+                    "ok": is_passed,
+                    "gold_json": msg.get("gold", []),
+                    "pred_json": normalize_pred(json.loads(response_body)) if is_passed else None,
+                })
+
+            logger.info("done handling group")
+
+        engine = create_async_engine(
+            async_dsn,
+            pool_pre_ping=True,
+            pool_size=2,
+            max_overflow=2,
+        )
+        SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+        await _finalize_run(SessionLocal=SessionLocal, run_id=run_id, predictions=data_to_save)
+    except Exception as e:
+        logger.error("RUN ERROR", extra={'error': type(e).__name__, 'str': f'{e}'})
 
 
 def handler(event, context):
@@ -158,12 +165,11 @@ def handler(event, context):
     logger.info("REQUEST_CONNECT_TIMEOUT", extra={'REQUEST_CONNECT_TIMEOUT': REQUEST_CONNECT_TIMEOUT})
     logger.info("EVENT_KEYS", extra={'keys': list(event.keys()) if isinstance(event, dict) else None})
 
-    sample_messages = []
-
     items = event["items"]
-
     run_id = int(event.get("run_id"))
     endpoint_url = str(event.get("endpoint_url", "")).rstrip("/")
+
+    sample_messages = []
     for it in items:
         try:
             sample_messages.append({
@@ -178,50 +184,5 @@ def handler(event, context):
 
     logger.info("MESSAGES_PARSED", extra={'sample_count': len(sample_messages)})
 
-    async def _run():
-        engine = create_async_engine(
-            _db_url(),
-            pool_pre_ping=True,
-            pool_size=2,
-            max_overflow=2,
-        )
-        SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-        try:
-            timeout = httpx.Timeout(
-                connect=REQUEST_CONNECT_TIMEOUT,
-                read=REQUEST_READ_TIMEOUT,
-                write=REQUEST_READ_TIMEOUT,
-                pool=None,
-            )
-            limits = httpx.Limits(
-                max_connections=CONCURRENCY,
-                max_keepalive_connections=CONCURRENCY,
-            )
-            sem = asyncio.Semaphore(CONCURRENCY)
-
-            async with httpx.AsyncClient(timeout=timeout, limits=limits, http2=True) as client:
-                async def bounded_process(m: dict):
-                    async with sem:
-                        try:
-                            return await _process_message(m, client=client)
-                        except BaseException as e:
-                            logger.warning("TASK_CRASHED", extra={
-                                "run_id": m.get("run_id"), "sample_idx": m.get("sample_idx"), "error": repr(e)[:500]})
-                            return {
-                                "run_id": m.get("run_id"),
-                                "sample_idx": m.get("sample_idx"),
-                                "latency_ms": None,
-                                "ok": False,
-                                "gold_json": m.get("gold"),
-                                "pred_json": None,
-                            }
-
-                tasks = [asyncio.create_task(bounded_process(m)) for m in sample_messages]
-                results = await asyncio.gather(*tasks)
-
-            await _finalize_run(SessionLocal=SessionLocal, run_id=run_id, predictions=results)
-        finally:
-            await engine.dispose()
-
-    asyncio.run(_run())
+    asyncio.run(_run(run_id, sample_messages))
     return {"processed": len(sample_messages)}
