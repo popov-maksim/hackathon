@@ -331,21 +331,6 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         except Exception:
             return "—"
 
-    def progress_bar(done: int, total: int, width: int = 20) -> str | None:
-        try:
-            td = int(done)
-            tt = int(total)
-        except Exception:
-            return None
-        if tt <= 0:
-            return None
-        ratio = max(0.0, min(1.0, (td / tt)))
-        filled = int(ratio * width)
-        empty = width - filled
-        bar = "█" * filled + "░" * empty
-        percent = int(ratio * 100)
-        return f"[{bar}] {percent}%"
-
     status_map = {"queued": "В очереди", "running": "Выполняется", "done": "Завершено"}
     status_emoji = {"queued": "⏳", "running": "🔄", "done": "✅"}
 
@@ -409,16 +394,8 @@ async def cb_last_result(callback_query: types.CallbackQuery):
         st = status_map.get(cur_status, cur_status)
         st_emoji = status_emoji.get(cur_status, "ℹ️")
         status_line = f"{st_emoji} Статус: {st}"
-        run_line = f"`run_id={last.get('run_id')}`\nУспешно/Тотал`{last.get('samples_success')}/{last.get('samples_total')}`"
     else:
         status_line = "ℹ️ Статус: Сейчас нет активной оценки"
-        run_line = None
-
-    pb_line = None
-    if is_active:
-        pb = progress_bar(last.get("samples_processed", 0) or 0, last.get("samples_total", 0) or 0)
-        if pb:
-            pb_line = f"Прогресс: {pb}"
 
     last_f1 = (last.get("f1") if last and cur_status == "done" else None)
     last_lat = (last.get("avg_latency_ms") if last and cur_status == "done" else None)
@@ -442,10 +419,6 @@ async def cb_last_result(callback_query: types.CallbackQuery):
     sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     lines = [header, sep, "_📡 Online метрики_", ""]
     lines.append(status_line)
-    if run_line:
-        lines.append(run_line)
-    if pb_line:
-        lines.append(pb_line)
     lines.append("")
     lines.extend(last_block_lines)
     if best_block_lines:
@@ -504,7 +477,7 @@ async def cb_last_result(callback_query: types.CallbackQuery):
 
     msg = await bot.send_message(cid, "\n".join(lines), reply_markup=kb_registered(), parse_mode="Markdown")
     # Auto-update progress if running
-    if is_active and pb_line:
+    if is_active:
         old = PROGRESS_WATCHERS.get(cid)
         if old and not old.done():
             old.cancel()
@@ -638,21 +611,6 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
         except Exception:
             return "—"
 
-    def progress_bar(done: int, total: int, width: int = 20) -> str | None:
-        try:
-            td = int(done)
-            tt = int(total)
-        except Exception:
-            return None
-        if tt <= 0:
-            return None
-        ratio = max(0.0, min(1.0, (td / tt)))
-        filled = int(ratio * width)
-        empty = width - filled
-        bar = "█" * filled + "░" * empty
-        percent = int(ratio * 100)
-        return f"[{bar}] {percent}%"
-
     status_map = {"queued": "В очереди", "running": "Выполняется", "done": "Завершено"}
     status_emoji = {"queued": "⏳", "running": "🔄", "done": "✅"}
 
@@ -713,16 +671,8 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
         st = status_map.get(cur_status, cur_status)
         st_emoji = status_emoji.get(cur_status, "ℹ️")
         status_line = f"{st_emoji} Статус: {st}"
-        run_line = f"Запуск: `run_id={last.get('run_id')}`  `{last.get('samples_success')}/{last.get('samples_total')}`"
     else:
         status_line = "ℹ️ Статус: Сейчас нет активной оценки"
-        run_line = None
-
-    pb_line = None
-    if is_active:
-        pb = progress_bar(last.get("samples_processed", 0) or 0, last.get("samples_total", 0) or 0)
-        if pb:
-            pb_line = f"Прогресс: {pb}"
 
     last_f1 = (last.get("f1") if last and cur_status == "done" else None)
     last_lat = (last.get("avg_latency_ms") if last and cur_status == "done" else None)
@@ -745,10 +695,6 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
     sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     lines = [header, sep, "_📡 Online метрики_", ""]
     lines.append(status_line)
-    if run_line:
-        lines.append(run_line)
-    if pb_line:
-        lines.append(pb_line)
     lines.append("")
     lines.extend(last_block_lines)
     if best_block_lines:
@@ -805,7 +751,7 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
         lines.extend(offline_best_lines)
 
     text = "\n".join(lines)
-    should_watch = bool(is_active and pb_line)
+    should_watch = bool(is_active)
     return text, should_watch
 
 
@@ -827,6 +773,8 @@ async def _watch_and_update_results(cid: int, message_id: int):
         task = PROGRESS_WATCHERS.get(cid)
         if task and task is asyncio.current_task():
             PROGRESS_WATCHERS.pop(cid, None)
+
+
 @dispatcher.callback_query_handler(lambda c: c.data == "last_csv_result", state='*')
 async def cb_last_csv_result(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
