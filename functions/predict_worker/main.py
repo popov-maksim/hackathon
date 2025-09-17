@@ -11,7 +11,7 @@ import aiohttp
 import stamina
 import numpy as np
 from pythonjsonlogger import jsonlogger
-from sqlalchemy import update, select, and_
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
@@ -161,9 +161,15 @@ def handler(event, context):
     logger.info("EVENT", extra=event)
     logger.info("EVENT_KEYS", extra={'keys': list(event.keys()) if isinstance(event, dict) else None})
 
-    items = event["items"]
-    run_id = int(event.get("run_id"))
-    endpoint_url = str(event.get("endpoint_url", "")).rstrip("/")
+    body = event.get("body", None)
+    if body is not None:
+        body = json.loads(body)
+    else:
+        return
+
+    items = body["items"]
+    run_id = int(body.get("run_id"))
+    endpoint_url = str(body.get("endpoint_url", "")).rstrip("/")
 
     sample_messages = []
     for it in items:

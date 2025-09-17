@@ -13,7 +13,6 @@ BUILD_DIR="$ROOT_DIR/build"
 : "${YC_SA_ID:?Set YC_SA_ID to your Service Account ID}"
 
 FN_PREDICT_NAME="${FN_PREDICT_NAME:-predict-worker}"
-FN_FINALIZER_NAME="${FN_FINALIZER_NAME:-run-finalizer}"
 FN_OFFLINE_CSV_NAME="${FN_OFFLINE_CSV_NAME:-offline-csv-worker}"
 
 # Load .env if present to pick DB/TIMEOUT vars
@@ -47,7 +46,6 @@ echo "[i] Building function sources..."
 
 echo "[i] Ensuring functions exist..."
 yc serverless function create --name "$FN_PREDICT_NAME" >/dev/null 2>&1 || true
-yc serverless function create --name "$FN_FINALIZER_NAME" >/dev/null 2>&1 || true
 yc serverless function create --name "$FN_OFFLINE_CSV_NAME" >/dev/null 2>&1 || true
 
 echo "[i] Deploying version: $FN_PREDICT_NAME"
@@ -67,23 +65,6 @@ yc serverless function version create \
   --environment POSTGRES_PORT="$POSTGRES_PORT" \
   --environment REQUEST_CONNECT_TIMEOUT="$REQUEST_CONNECT_TIMEOUT" \
   --environment REQUEST_READ_TIMEOUT="$REQUEST_READ_TIMEOUT" \
-  --environment RUN_TIME_LIMIT_SECONDS="$RUN_TIME_LIMIT_SECONDS"
-
-echo "[i] Deploying version: $FN_FINALIZER_NAME"
-yc serverless function version create \
-  --function-name "$FN_FINALIZER_NAME" \
-  --runtime python311 \
-  --entrypoint main.handler \
-  --memory 512MB \
-  --execution-timeout 600s \
-  --service-account-id "$YC_SA_ID" \
-  --source-path "$BUILD_DIR/run_finalizer" \
-  --network-name default \
-  --environment POSTGRES_USER="$POSTGRES_USER" \
-  --environment POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  --environment POSTGRES_DB="$POSTGRES_DB" \
-  --environment POSTGRES_HOST="$POSTGRES_HOST" \
-  --environment POSTGRES_PORT="$POSTGRES_PORT" \
   --environment RUN_TIME_LIMIT_SECONDS="$RUN_TIME_LIMIT_SECONDS"
 
 echo "[i] Deploying version: $FN_OFFLINE_CSV_NAME"
@@ -107,53 +88,3 @@ yc serverless function version create \
   --environment SECRET_KEY="$SECRET_KEY"
 
 echo "[✓] Deployed Cloud Functions."
-
-# --- Triggers registration ---
-echo "[i] Ensuring triggers exist..."
-
-# Predict-worker MQ trigger
-TRIGGER_MQ_NAME="${TRIGGER_MQ_NAME:-predict-worker-trigger}"
-TRIGGER_BATCH_SIZE="${TRIGGER_BATCH_SIZE:-400}"
-TRIGGER_BATCH_CUTOFF="${TRIGGER_BATCH_CUTOFF:-5s}"
-TRIGGER_VISIBILITY_TIMEOUT="${TRIGGER_VISIBILITY_TIMEOUT:-90s}"
-
-# Accept either ARN or Queue URL
-QUEUE_IDENT="${YMQ_QUEUE_ARN:-}"
-if [[ -z "$QUEUE_IDENT" || "$QUEUE_IDENT" == "" ]]; then
-  QUEUE_IDENT="${YMQ_QUEUE_URL:-}"
-fi
-
-if [[ -n "$QUEUE_IDENT" ]]; then
-  # Delete existing MQ trigger to avoid CLI update quirks
-  if yc serverless trigger get --name "$TRIGGER_MQ_NAME" >/dev/null 2>&1; then
-    yc serverless trigger delete --name "$TRIGGER_MQ_NAME"
-  fi
-  echo "[i] Creating MQ trigger '$TRIGGER_MQ_NAME'"
-  MQ_FLAGS=(--name "$TRIGGER_MQ_NAME" --queue "$QUEUE_IDENT" --queue-service-account-id "$YC_SA_ID" --invoke-function-name "$FN_PREDICT_NAME" --invoke-function-service-account-id "$YC_SA_ID")
-  if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--batch-size'; then
-    MQ_FLAGS+=(--batch-size "$TRIGGER_BATCH_SIZE")
-  fi
-  if yc serverless trigger create message-queue --help 2>/dev/null | grep -q -- '--batch-cutoff'; then
-    MQ_FLAGS+=(--batch-cutoff "$TRIGGER_BATCH_CUTOFF")
-  fi
-  yc serverless trigger create message-queue "${MQ_FLAGS[@]}"
-else
-  echo "[!] YMQ_QUEUE_URL or YMQ_QUEUE_ARN not set; skipping MQ trigger creation" >&2
-fi
-
-# Run-finalizer timer trigger
-TRIGGER_TIMER_NAME="${TRIGGER_TIMER_NAME:-run-finalizer-trigger}"
-# Yandex Cloud timer expects Quartz-style 6-field cron
-CRON_EXPR="${TRIGGER_TIMER_CRON:-* * * * ? *}"
-
-if yc serverless trigger get --name "$TRIGGER_TIMER_NAME" >/dev/null 2>&1; then
-  yc serverless trigger delete --name "$TRIGGER_TIMER_NAME"
-fi
-echo "[i] Creating timer trigger '$TRIGGER_TIMER_NAME'"
-yc serverless trigger create timer \
-  --name "$TRIGGER_TIMER_NAME" \
-  --cron-expression "$CRON_EXPR" \
-  --invoke-function-name "$FN_FINALIZER_NAME" \
-  --invoke-function-service-account-id "$YC_SA_ID"
-
-echo "[✓] Triggers ensured: $TRIGGER_MQ_NAME, $TRIGGER_TIMER_NAME"

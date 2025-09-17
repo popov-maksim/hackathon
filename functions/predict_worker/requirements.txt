@@ -4,3 +4,7 @@ asyncpg==0.29.0
 pydantic==2.8.2
 python-dotenv==1.0.1
 python-json-logger==2.0.4
+httpx[http2]>=0.27.0
+aiohttp
+stamina
+numpy
