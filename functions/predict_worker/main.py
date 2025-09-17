@@ -95,7 +95,6 @@ async def make_request(session: aiohttp.ClientSession, url: str, data: dict) -> 
     """
     :return: [успешный ли ответ, время в мс, текст тела ответа]
     """
-    logger.info("making request")
     start_time = time.perf_counter_ns()
     try:
         async with session.post(url, json=data) as response:
@@ -104,8 +103,6 @@ async def make_request(session: aiohttp.ClientSession, url: str, data: dict) -> 
             if response.status == 200:
                 text = await response.text()
                 is_passed = True
-                logger.info("response", extra={'text': text})
-            logger.info("status", extra={'status': response.status})
             return is_passed, (end_time - start_time) / 1e6, text
     except Exception as e:
         logger.error("ERROR REQUEST", extra={'error': str(e)})
@@ -161,8 +158,7 @@ async def _run(run_id: int, messages: list[dict[str, str]]):
 
 
 def handler(event, context):
-    logger.info("REQUEST_READ_TIMEOUT", extra={'REQUEST_READ_TIMEOUT': REQUEST_READ_TIMEOUT})
-    logger.info("REQUEST_CONNECT_TIMEOUT", extra={'REQUEST_CONNECT_TIMEOUT': REQUEST_CONNECT_TIMEOUT})
+    logger.info("EVENT", extra=event)
     logger.info("EVENT_KEYS", extra={'keys': list(event.keys()) if isinstance(event, dict) else None})
 
     items = event["items"]
@@ -183,6 +179,7 @@ def handler(event, context):
             logger.warning("BAD_ITEM_SKIPPED")
 
     logger.info("MESSAGES_PARSED", extra={'sample_count': len(sample_messages)})
+    logger.info("messages", extra={'messages': sample_messages})
 
     asyncio.run(_run(run_id, sample_messages))
     return {"processed": len(sample_messages)}

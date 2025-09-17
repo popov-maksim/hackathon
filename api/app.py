@@ -108,7 +108,6 @@ async def _build_run_items(phase: Phase) -> list[dict]:
                 sample = row.get("sample", "")
                 gold = parse_annotation_literal(row.get("annotation", ""))
                 items.append({"sample_idx": idx, "sample": sample, "gold": gold})
-                print(gold)
         return items
 
     return await asyncio.to_thread(_read_sync)
