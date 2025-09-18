@@ -112,7 +112,6 @@ async def api_post_multipart(path, data: dict, files: dict):
 class RegisterStates(StatesGroup):
     """Регистрация команды"""
     waiting_team = State()
-    waiting_endpoint = State()
 
 
 class ChangeEndpointStates(StatesGroup):
@@ -138,9 +137,9 @@ def kb_unregistered() -> types.InlineKeyboardMarkup:
 
 def kb_registered() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=2)
-    btn_run = types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run")
+    btn_run = types.InlineKeyboardButton(text="▶️ Запустить online-оценку", callback_data="run")
+    btn_upload = types.InlineKeyboardButton(text="📤 Проверить offline-ответы", callback_data="upload_csv")
     btn_download = types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset")
-    btn_upload = types.InlineKeyboardButton(text="📤 Отправить ответы", callback_data="upload_csv")
     btn_results = types.InlineKeyboardButton(text="📊 Результаты", callback_data="last_result")
     btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard")
     btn_change_url = types.InlineKeyboardButton(text="🔧 Установить URL сервиса", callback_data="change_endpoint")
@@ -148,8 +147,8 @@ def kb_registered() -> types.InlineKeyboardMarkup:
 
     # 1-й ряд: одна кнопка
     kb.row(btn_run)
-    # 2-й ряд: две кнопки
-    kb.row(btn_download, btn_upload)
+    # 2-й ряд: одна кнопка
+    kb.row(btn_upload)
     # 3-й ряд: две кнопки
     kb.row(btn_results, btn_lb)
     # 4-й ряд: две кнопки
@@ -214,14 +213,22 @@ async def cmd_start(message: types.Message, state: FSMContext):
     try:
         team = await api_get(f"/teams/{cid}")
         name = team.get('name') or '—'
+        tg_username = team.get('tg_username') or '—'
         url = team.get('endpoint_url') or '—'
         gh = team.get('github_url') or '—'
+        def _mark(v: str) -> str:
+            try:
+                return "✅" if (v and str(v).strip() and str(v).strip() != '—') else "❗"
+            except Exception:
+                return "❗"
         text = (
-            "👥 <b>Команда</b>:\n"
+            f"👥 <b>Команда</b> {_mark(name)}:\n"
             f"-- {html.escape(str(name))}\n\n"
-            "🔗 <b>Текущий URL</b>:\n"
+            f"👤 <b>Контактный Telegram username</b> {_mark(tg_username)}:\n"
+            f"-- {html.escape(str(tg_username))}\n\n"
+            f"🔗 <b>Текущий URL</b> {_mark(url)}:\n"
             f"-- {html.escape(str(url))}\n\n"
-            "📦 <b>Текущий GitHub</b>:\n"
+            f"📦 <b>Текущий GitHub</b> {_mark(gh)}:\n"
             f"-- {html.escape(str(gh))}\n\n"
         )
         kb = kb_registered()
@@ -259,35 +266,31 @@ async def st_register_team(message: types.Message, state: FSMContext):
     team = message.text.strip()
     if not team:
         return await message.reply("Название команды не может быть пустым. Введите ещё раз:")
-    await state.update_data(team_name=team)
-    await message.reply("Теперь введите IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).", reply_markup=kb_cancel_inline())
-    await RegisterStates.waiting_endpoint.set()
-
-
-@dispatcher.message_handler(state=RegisterStates.waiting_endpoint)
-async def st_register_endpoint(message: types.Message, state: FSMContext):
-    if not message.text or not isinstance(message.text, str):
-        return await message.reply("Пожалуйста, отправьте URL текстом. Или /cancel для отмены.")
-    if message.text.startswith('/'):
-        return await message.reply("Это похоже на команду. Отправьте URL текстом или используйте /cancel.")
-    endpoint = _normalize_endpoint(message.text)
-    data = await state.get_data()
-    team_name = data.get("team_name")
+    # Регистрируем команду без ожидания URL сервиса
+    tg_username = (message.from_user.username or "").strip()
+    if not tg_username:
+        # Фолбэк, если у пользователя не задан username в Telegram
+        tg_username = f"id_{message.from_user.id}"
     try:
         resp = await api_post(
             "/teams/register",
-            {"tg_chat_id": message.chat.id, "team_name": team_name, "endpoint_url": endpoint},
+            {
+                "tg_chat_id": message.chat.id,
+                "team_name": team,
+                "tg_username": tg_username,
+            },
         )
+        name = resp.get('name', team)
         await message.reply(
-            f"Регистрация завершена.\nНазвание команды: {resp['name']}\nТекущий URL: {resp.get('endpoint_url', endpoint)}",
-            reply_markup=kb_registered()
+            (
+                f"Регистрация завершена.\n"
+                f"Название команды: {html.escape(str(name))}\n\n"
+            ),
+            reply_markup=kb_registered(),
+            parse_mode="HTML",
         )
         await state.finish()
     except BackendError as e:
-        # Для ошибок валидации оставляем пользователя в том же шаге
-        if e.status in (400, 422):
-            await message.reply(f"Ошибка регистрации: {e.message}\nВведите корректный URL или /cancel для отмены.")
-            return
         await message.reply(f"Ошибка регистрации: {e.message}", reply_markup=kb_unregistered())
         await state.finish()
     except Exception:
@@ -828,7 +831,7 @@ async def cb_change_endpoint(callback_query: types.CallbackQuery, state: FSMCont
         await state.finish()
     except Exception:
         pass
-    await bot.send_message(cid, "Введите новый IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).", reply_markup=kb_cancel_inline())
+    await bot.send_message(cid, "Введите IP или URL вашего сервиса (например, 1.2.3.4:8000 или https://host).", reply_markup=kb_cancel_inline())
     await ChangeEndpointStates.waiting_endpoint.set()
 
 
@@ -844,7 +847,12 @@ async def st_change_endpoint(message: types.Message, state: FSMContext):
         team = await api_get(f"/teams/{cid}")
         resp = await api_post(
             "/teams/register",
-            {"tg_chat_id": cid, "team_name": team["name"], "endpoint_url": endpoint},
+            {
+                "tg_chat_id": cid,
+                "team_name": team["name"],
+                "tg_username": team["tg_username"],
+                "endpoint_url": endpoint,
+            },
         )
         await message.reply(
             f"Готово. Обновлён URL для команды: {resp['name']}\nТекущий URL: {resp.get('endpoint_url', endpoint)}",
@@ -892,7 +900,7 @@ async def st_change_github(message: types.Message, state: FSMContext):
         payload = {
             "tg_chat_id": cid,
             "team_name": team["name"],
-            "endpoint_url": team.get("endpoint_url", ""),
+            "tg_username": team["tg_username"],
             "github_url": gh,
         }
         resp = await api_post("/teams/register", payload)

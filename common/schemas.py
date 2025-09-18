@@ -5,7 +5,7 @@ from typing import List, Optional
 class RegisterTeamIn(BaseModel):
     tg_chat_id: int
     team_name: str
-    # endpoint_url is optional to allow partial updates (e.g., only GitHub)
+    tg_username: str
     endpoint_url: AnyHttpUrl | None = None
     github_url: AnyHttpUrl | None = None
 
@@ -13,7 +13,8 @@ class RegisterTeamIn(BaseModel):
 class TeamOut(BaseModel):
     team_id: int
     name: str
-    endpoint_url: str
+    tg_username: str
+    endpoint_url: Optional[str] = None
     github_url: Optional[str] = None
 
 

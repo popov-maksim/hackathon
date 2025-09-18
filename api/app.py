@@ -127,7 +127,13 @@ async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
     team = result.scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
-    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=str(team.github_url))
+    return TeamOut(
+        team_id=team.id,
+        name=team.name,
+        tg_username=team.tg_username,
+        endpoint_url=team.endpoint_url,
+        github_url=team.github_url
+    )
 
 
 @app.post("/teams/register", response_model=TeamOut)
@@ -136,27 +142,32 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
     query = select(Team).where(Team.tg_chat_id == payload.tg_chat_id)
     result = await db.execute(query)
     team = result.scalar_one_or_none()
+
     if team is None:
-        # For initial registration, endpoint_url must be provided
-        if payload.endpoint_url is None:
-            raise HTTPException(status_code=400, detail="endpoint_url is required for registration")
         team = Team(
             tg_chat_id=payload.tg_chat_id,
             name=payload.team_name,
-            endpoint_url=str(payload.endpoint_url),
-            github_url=str(payload.github_url),
+            tg_username=payload.tg_username,
+            endpoint_url=payload.endpoint_url,
+            github_url=payload.github_url,
         )
         db.add(team)
         await db.commit()
         await db.refresh(team)
     else:
-        # Partial update: change only provided fields
         if payload.endpoint_url is not None:
-            team.endpoint_url = str(payload.endpoint_url)
+            team.endpoint_url = payload.endpoint_url
         if payload.github_url is not None:
-            team.github_url = str(payload.github_url)
+            team.github_url = payload.github_url
         await db.commit()
-    return TeamOut(team_id=team.id, name=team.name, endpoint_url=str(team.endpoint_url), github_url=str(team.github_url))
+
+    return TeamOut(
+        team_id=team.id,
+        name=team.name,
+        tg_username=team.tg_username,
+        endpoint_url=team.endpoint_url,
+        github_url=team.github_url
+    )
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
@@ -416,6 +427,8 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
     team = (await db.execute(select(Team).where(Team.tg_chat_id == payload.tg_chat_id))).scalar_one_or_none()
     if team is None:
         raise HTTPException(status_code=404, detail="Команда не найдена")
+    if team.endpoint_url is None:
+        raise HTTPException(status_code=400, detail="Не указан URL сервиса")
 
     active_run_query = (
         select(Run)

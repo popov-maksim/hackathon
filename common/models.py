@@ -27,8 +27,9 @@ class Team(Base):
 
     id = Column(Integer, primary_key=True)
     tg_chat_id = Column(BigInteger, unique=True, nullable=False)
+    tg_username = Column(String(128), nullable=False)
     name = Column(String(128), unique=True, nullable=False)
-    endpoint_url = Column(String(512), nullable=False)
+    endpoint_url = Column(String(512), nullable=True)
     github_url = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
