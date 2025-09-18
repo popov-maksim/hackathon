@@ -733,6 +733,7 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
     offline_status_line = "ℹ️ Статус: Пока нет оффлайн-оценок"
     offline_last_lines: list[str] = []
     offline_best_lines: list[str] = []
+    offline_active = False
 
     try:
         last_csv = await api_get(f"/teams/{cid}/last_csv")
@@ -743,6 +744,8 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
             offline_status_line = "🔄 Статус: Выполняется"
         else:
             offline_status_line = f"ℹ️ Статус: {st}"
+        # Активность оффлайн‑оценки: любое незавершённое состояние
+        offline_active = (st in ("queued", "running")) or (st != "done")
         offline_last_lines = [
             "🧪 Последняя отправка:",
             f"└─ F1: `{fmt_f1(last_csv.get('f1'))}`",
@@ -773,7 +776,8 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
         lines.extend(offline_best_lines)
 
     text = "\n".join(lines)
-    should_watch = bool(is_active)
+    # Автообновление если активна онлайн ИЛИ оффлайн оценка
+    should_watch = bool(is_active or offline_active)
     return text, should_watch
 
 
