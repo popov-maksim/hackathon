@@ -1,16 +1,15 @@
 import ast
 import unicodedata
-from typing import List, Dict, Tuple, Set
+from collections import defaultdict
+from typing import List, Dict, Tuple
 
 
 def nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 
-def normalize_pred(obj) -> List[Dict]:
+def normalize_pred(obj) -> List[Dict] | None:
     try:
-        if obj is None:
-            return []
         if isinstance(obj, dict):
             if "spans" in obj:
                 spans = obj.get("spans") or []
@@ -29,6 +28,7 @@ def normalize_pred(obj) -> List[Dict]:
                         if isinstance(t, (list, tuple)) and len(t) == 3:
                             tmp.append({"start": int(t[0]), "end": int(t[1]), "label": str(t[2])})
                     return tmp
+
         if isinstance(obj, list):
             out = []
             for it in obj:
@@ -37,9 +37,10 @@ def normalize_pred(obj) -> List[Dict]:
                 elif isinstance(it, (list, tuple)) and len(it) == 3:
                     out.append({"start": int(it[0]), "end": int(it[1]), "label": str(it[2])})
             return out
+
+        return None
     except Exception:
-        return []
-    return []
+        return None
 
 
 def parse_annotation_literal(s: str) -> List[Dict]:
@@ -59,23 +60,50 @@ def parse_annotation_literal(s: str) -> List[Dict]:
 
 
 def f1_macro(samples: List[Tuple[List[Dict], List[Dict]]]) -> float:
-    labels: Set[str] = set()
-    for gold, _ in samples:
+    entity_types = set()
+
+    for gold, pred in samples:
+        if gold:
+            entity_types.update({s["label"][2:] for s in gold})
+        if pred:
+            entity_types.update({s["label"][2:] for s in pred})
+
+    tp_per_type = defaultdict(int)
+    fp_per_type = defaultdict(int)
+    fn_per_type = defaultdict(int)
+
+    for gold, pred in samples:
+        if pred is None:
+            continue
+
+        gold_by_type = defaultdict(set)
+        pred_by_type = defaultdict(set)
+
         for s in gold:
-            labels.add(str(s["label"]))
-    if not labels:
-        return 0.0
-    f1s = []
-    for label in labels:
-        TP = FP = FN = 0
-        for gold, pred in samples:
-            g = {(int(s["start"]), int(s["end"])) for s in gold if str(s["label"]) == label}
-            p = {(int(s["start"]), int(s["end"])) for s in pred if str(s["label"]) == label}
-            TP += len(g & p)
-            FP += len(p - g)
-            FN += len(g - p)
-        precision = TP / (TP + FP) if (TP + FP) else 0.0
-        recall = TP / (TP + FN) if (TP + FN) else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
-        f1s.append(f1)
-    return sum(f1s) / len(f1s)
+            gold_by_type[s["label"][2:]].add((s["start"], s["end"], s["label"]))
+
+        for s in pred:
+            pred_by_type[s["label"][2:]].add((s["start"], s["end"], s["label"]))
+
+        for t in entity_types:
+            gold_set = gold_by_type[t]
+            pred_set = pred_by_type[t]
+
+            tp_per_type[t] += len(gold_set & pred_set)
+            fp_per_type[t] += len(pred_set - gold_set)
+            fn_per_type[t] += len(gold_set - pred_set)
+
+    f1_scores = []
+    for t in entity_types:
+        tp = tp_per_type[t]
+        fp = fp_per_type[t]
+        fn = fn_per_type[t]
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+        f1_scores.append(f1)
+
+    macro_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0
+    return macro_f1

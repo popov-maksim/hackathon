@@ -64,7 +64,7 @@ async def _finalize_run(*, SessionLocal: async_sessionmaker, run_id: int, predic
         for it in predictions
     ]
 
-    pairs = [(val["gold_json"] or [], val["pred_json"] or []) for val in values]
+    pairs = [(val["gold_json"], val["pred_json"]) for val in values]
     latencies = [val["latency_ms"] for val in values if val["latency_ms"] is not None]
 
     async with SessionLocal() as db:
@@ -90,25 +90,27 @@ async def _finalize_run(*, SessionLocal: async_sessionmaker, run_id: int, predic
             )
 
 
-@stamina.retry(on=Exception, attempts=2)
 async def make_request(session: aiohttp.ClientSession, url: str, data: dict) -> tuple[bool, float, str]:
     """
     :return: [успешный ли ответ, время в мс, текст тела ответа]
     """
-    start_time = time.perf_counter_ns()
+    # Одна попытка: не-200 → не исключение (retry не нужен), сетевые/таймауты → исключение (retry)
+    @stamina.retry(on=Exception, attempts=RETRIES)
+    async def make_attempt() -> tuple[bool, float, str]:
+        body = None
+        ok = False
+        start_ns = time.perf_counter_ns()
+        async with session.post(url, json=data) as resp:
+            end_ns = time.perf_counter_ns()
+            if resp.status == 200:
+                body = await resp.text()
+                ok = True
+        return ok, (end_ns - start_ns) / 1e6, body
+
     try:
-        async with session.post(url, json=data) as response:
-            end_time = time.perf_counter_ns()
-            is_passed = False
-            if response.status == 200:
-                text = await response.text()
-                is_passed = True
-            return is_passed, (end_time - start_time) / 1e6, text
+        return await make_attempt()
     except Exception as e:
-        logger.error("ERROR REQUEST", extra={'error': str(e)})
-        raise e
-        # end_time = time.perf_counter_ns()
-        # return False, (end_time - start_time) / 1e6, f"error: {e}"
+        return False, None, None
 
 
 async def _run(run_id: int, messages: list[dict[str, str]]):
@@ -140,7 +142,7 @@ async def _run(run_id: int, messages: list[dict[str, str]]):
                     "latency_ms": latency if is_passed else None,
                     "ok": is_passed,
                     "gold_json": msg.get("gold", []),
-                    "pred_json": normalize_pred(json.loads(response_body)) if is_passed else None,
+                    "pred_json": normalize_pred(json.loads(response_body)) if is_passed and response_body else None,
                 })
 
             logger.info("done handling group")
@@ -165,7 +167,7 @@ def handler(event, context):
     if body is not None:
         body = json.loads(body)
     else:
-        return
+        return {"processed": 0}
 
     items = body["items"]
     run_id = int(body.get("run_id"))
@@ -183,9 +185,6 @@ def handler(event, context):
             })
         except Exception:
             logger.warning("BAD_ITEM_SKIPPED")
-
-    logger.info("MESSAGES_PARSED", extra={'sample_count': len(sample_messages)})
-    logger.info("messages", extra={'messages': sample_messages})
 
     asyncio.run(_run(run_id, sample_messages))
     return {"processed": len(sample_messages)}

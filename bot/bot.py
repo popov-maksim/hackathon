@@ -1,5 +1,6 @@
 import io
 import os
+import html
 import logging
 import asyncio
 
@@ -18,7 +19,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dispatcher = Dispatcher(bot, storage=MemoryStorage())
 
-# Active progress watchers per chat. Prevents duplicate updaters.
 PROGRESS_WATCHERS: dict[int, asyncio.Task] = {}
 
 
@@ -35,7 +35,7 @@ def _extract_backend_error(resp: httpx.Response) -> str:
     except Exception:
         text = (resp.text or "").strip()
         return f"Ошибка {resp.status_code}: {text or 'Неизвестная ошибка'}"
-    # FastAPI HTTPException: {"detail": "..."} или {"detail": [{...}]}
+
     if isinstance(data, dict) and "detail" in data:
         detail = data["detail"]
         if isinstance(detail, str):
@@ -56,7 +56,7 @@ def _extract_backend_error(resp: httpx.Response) -> str:
                     parts.append(str(item))
             return "; ".join(parts) or f"Ошибка {resp.status_code}"
         return str(detail)
-    # Валидационные ошибки могут приходить как список
+
     if isinstance(data, list):
         parts = []
         for item in data:
@@ -69,6 +69,7 @@ def _extract_backend_error(resp: httpx.Response) -> str:
             else:
                 parts.append(str(item))
         return "; ".join(parts) or f"Ошибка {resp.status_code}"
+
     return f"Ошибка {resp.status_code}: {data}"
 
 
@@ -108,25 +109,27 @@ async def api_post_multipart(path, data: dict, files: dict):
             raise BackendError("Сервис API недоступен. Проверьте URL и доступность.")
 
 
-# states
 class RegisterStates(StatesGroup):
+    """Регистрация команды"""
     waiting_team = State()
     waiting_endpoint = State()
 
 
 class ChangeEndpointStates(StatesGroup):
+    """Смена URL сервиса"""
     waiting_endpoint = State()
 
 
 class ChangeGithubStates(StatesGroup):
+    """Смена GitHub ссылки"""
     waiting_github = State()
 
 
 class UploadCSVStates(StatesGroup):
+    """Загрузка CSV-файла"""
     waiting_file = State()
 
 
-# --- Keyboards ---
 def kb_unregistered() -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(text="📝 Регистрация команды", callback_data="register"))
@@ -138,10 +141,10 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     btn_run = types.InlineKeyboardButton(text="▶️ Оценить решение", callback_data="run")
     btn_download = types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset")
     btn_upload = types.InlineKeyboardButton(text="📤 Отправить ответы", callback_data="upload_csv")
-    btn_results = types.InlineKeyboardButton(text="📊 Результаты команды", callback_data="last_result")
+    btn_results = types.InlineKeyboardButton(text="📊 Результаты", callback_data="last_result")
     btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard")
-    btn_change = types.InlineKeyboardButton(text="🔧 Сменить URL сервиса", callback_data="change_endpoint")
-    btn_change_github = types.InlineKeyboardButton(text="🔧 Сменить GitHub ссылку", callback_data="change_github")
+    btn_change_url = types.InlineKeyboardButton(text="🔧 Установить URL сервиса", callback_data="change_endpoint")
+    btn_change_github = types.InlineKeyboardButton(text="🔧 Установить GitHub ссылку", callback_data="change_github")
 
     # 1-й ряд: одна кнопка
     kb.row(btn_run)
@@ -150,7 +153,9 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     # 3-й ряд: две кнопки
     kb.row(btn_results, btn_lb)
     # 4-й ряд: две кнопки
-    kb.row(btn_change, btn_change_github)
+    kb.row(btn_change_url)
+    # 5-й ряд: одна кнопка
+    kb.row(btn_change_github)
     return kb
 
 
@@ -198,7 +203,6 @@ def _normalize_endpoint(s: str) -> str:
     return s
 
 
-# --- /start ---
 @dispatcher.message_handler(commands=["start", "help"], state='*')
 async def cmd_start(message: types.Message, state: FSMContext):
     cid = message.chat.id
@@ -209,11 +213,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
         pass
     try:
         team = await api_get(f"/teams/{cid}")
-        url = team.get('endpoint_url')
-        gh = team.get('github_url')
-        url_line = f"\nТекущий URL: {url}" if url else ""
-        gh_line = f"\nТекущий GitHub: {gh}" if gh else ""
-        text = f"Команда: {team.get('name')}.{url_line}{gh_line}\nВыберите действие:"
+        name = team.get('name') or '—'
+        url = team.get('endpoint_url') or '—'
+        gh = team.get('github_url') or '—'
+        text = (
+            "👥 <b>Команда</b>:\n"
+            f"-- {html.escape(str(name))}\n\n"
+            "🔗 <b>Текущий URL</b>:\n"
+            f"-- {html.escape(str(url))}\n\n"
+            "📦 <b>Текущий GitHub</b>:\n"
+            f"-- {html.escape(str(gh))}\n\n"
+        )
         kb = kb_registered()
     except BackendError as e:
         if e.status == 404:
@@ -225,10 +235,9 @@ async def cmd_start(message: types.Message, state: FSMContext):
     except Exception:
         text = "Не удалось проверить регистрацию (неожиданная ошибка)."
         kb = kb_unregistered()
-    await message.reply(text, reply_markup=kb)
+    await message.reply(text, reply_markup=kb, parse_mode="HTML")
 
 
-# --- Callbacks: registration flow (2 steps) ---
 @dispatcher.callback_query_handler(lambda c: c.data == "register", state='*')
 async def cb_register(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.answer()
@@ -286,7 +295,6 @@ async def st_register_endpoint(message: types.Message, state: FSMContext):
         await state.finish()
 
 
-# --- Callbacks: run check and last result ---
 @dispatcher.callback_query_handler(lambda c: c.data == "run", state='*')
 async def cb_run(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
@@ -309,8 +317,16 @@ async def cb_confirm_run(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
     try:
-        data = await api_post("/runs/start", {"tg_chat_id": cid})
-        await bot.send_message(cid, f"Запущен тест: run_id={data['run_id']}, status={data['status']}", reply_markup=kb_registered())
+        await api_post("/runs/start", {"tg_chat_id": cid})
+        # Перенаправляем сразу на экран результатов, без сообщения о старте
+        text, cont = await _build_results_text_and_active(cid)
+        msg = await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
+        if cont:
+            old = PROGRESS_WATCHERS.get(cid)
+            if old and not old.done():
+                old.cancel()
+            PROGRESS_WATCHERS[cid] = asyncio.create_task(_watch_and_update_results(cid, msg.message_id))
+        return
     except BackendError as e:
         await bot.send_message(cid, f"Ошибка запуска: {e.message}", reply_markup=kb_registered())
     except Exception:
@@ -530,7 +546,7 @@ async def cb_upload_csv(callback_query: types.CallbackQuery, state: FSMContext):
         pass
     await bot.send_message(
         cid,
-        "Пришлите CSV-файл с вашими предсказаниями (столбец 'annotation', разделитель ';').",
+        "Пришлите CSV-файл с вашими ответами.",
         reply_markup=kb_cancel_inline(),
     )
     await UploadCSVStates.waiting_file.set()
@@ -556,10 +572,14 @@ async def st_upload_csv_file(message: types.Message, state: FSMContext):
         files = {"file": (doc.file_name or "predictions.csv", file_bytes, "text/csv")}
         data = {"tg_chat_id": str(cid)}
         res = await api_post_multipart("/runs_csv/upload", data=data, files=files)
-        await message.reply(
-            f"Откройте '📊 Результаты команды' → Offline метрики, чтобы посмотреть статус/результаты.",
-            reply_markup=kb_registered(),
-        )
+        # Сразу показываем экран результатов и запускаем автообновление, если есть активная задача
+        text, cont = await _build_results_text_and_active(cid)
+        msg = await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
+        if cont:
+            old = PROGRESS_WATCHERS.get(cid)
+            if old and not old.done():
+                old.cancel()
+            PROGRESS_WATCHERS[cid] = asyncio.create_task(_watch_and_update_results(cid, msg.message_id))
         await state.finish()
     except BackendError as e:
         await message.reply(f"Ошибка загрузки: {e.message}", reply_markup=kb_registered())
@@ -586,7 +606,6 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
                 name = str(it.get('team_name', ''))[:20]
                 f1_val = it.get('f1', None)
                 lat_val = it.get('avg_latency_ms', None)
-                # Render '-' when values are missing, otherwise format numbers
                 f1_str = '-' if f1_val is None else f"{float(f1_val):.4f}"
                 lat_str = '-' if lat_val is None else f"{float(lat_val):.1f}"
                 lines.append(f"{idx:>2}.  {name:<20}  {f1_str:>6}  {lat_str:>12}")
@@ -670,7 +689,7 @@ async def _build_results_text_and_active(cid: int) -> tuple[str, bool]:
     if is_active:
         st = status_map.get(cur_status, cur_status)
         st_emoji = status_emoji.get(cur_status, "ℹ️")
-        status_line = f"{st_emoji} Статус: {st}"
+        status_line = f"{st_emoji} Статус: {st} #{last.get('run_id')}"
     else:
         status_line = "ℹ️ Статус: Сейчас нет активной оценки"
 
@@ -894,7 +913,6 @@ async def st_change_github(message: types.Message, state: FSMContext):
         await state.finish()
 
 
-# --- Cancel handler ---
 @dispatcher.message_handler(commands=["cancel"], state='*')
 async def cmd_cancel(message: types.Message, state: FSMContext):
     try:
