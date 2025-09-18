@@ -493,7 +493,7 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
             "endpoint_url": team.endpoint_url,
             "items": items,
         }
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
 
     # Запускаем HTTP-вызов функции в фоне, не дожидаясь ответа
