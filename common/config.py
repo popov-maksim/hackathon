@@ -10,15 +10,6 @@ RUN_TIME_LIMIT_SECONDS = float(os.getenv("RUN_TIME_LIMIT_SECONDS", "1200"))  # 2
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
 
-# Yandex Message Queue (SQS-compatible)
-YMQ_ENDPOINT_URL = os.getenv("YMQ_ENDPOINT_URL", "https://message-queue.api.cloud.yandex.net")
-YMQ_REGION = os.getenv("YMQ_REGION", "ru-central1")
-YMQ_QUEUE_URL = os.getenv("YMQ_QUEUE_URL", "")  # Full QueueUrl
-YMQ_OFFLINE_QUEUE_URL = os.getenv("YMQ_OFFLINE_QUEUE_URL", "")  # Separate queue for offline CSV scoring
-
-# Publish options
-RUN_CHUNK_SIZE = int(os.getenv("RUN_CHUNK_SIZE", "1"))  # 1 = per-sample messages
-SQS_SEND_BATCH_MAX = 10  # SQS/YMQ limit
 
 # S3 / Object Storage (e.g., Yandex Object Storage)
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "https://storage.yandexcloud.net")
@@ -29,6 +20,9 @@ S3_RUNS_CSV_PREFIX = os.getenv("S3_RUNS_CSV_PREFIX", "runs_csv/")
 
 # Public Cloud Function endpoint for offline CSV scoring (HTTP trigger)
 OFFLINE_CF_URL = os.getenv("OFFLINE_CF_URL", "")
+
+# Public Cloud Function endpoint for online scoring (HTTP trigger)
+PREDICT_CF_URL = os.getenv("PREDICT_CF_URL", "")
 
 ACCESS_KEY = os.getenv("ACCESS_KEY", "")
 SECRET_KEY = os.getenv("SECRET_KEY", "")

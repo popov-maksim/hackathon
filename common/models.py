@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     func,
     UniqueConstraint,
+    Index,
 )
 
 from common.constants import RunStatus
@@ -47,6 +48,10 @@ class Phase(Base):
     n_csv_rows = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    __table_args__ = (
+        Index("ix_phases_created_at", "created_at"),
+    )
+
 
 class Run(Base):
     """Таблица со статистикой по запускам с пингом участников"""
@@ -65,6 +70,28 @@ class Run(Base):
     avg_latency_ms = Column(Float, nullable=True)
     f1 = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        # Для лидерборда: фильтр по (phase_id, status), разбиение по team_id и сортировка по f1/avg_latency
+        Index(
+            "ix_runs_phase_status_team_f1_lat_id",
+            "phase_id",
+            "status",
+            "team_id",
+            "f1",
+            "avg_latency_ms",
+            "id",
+        ),
+        # Для последнего запуска команды на этапе
+        Index(
+            "ix_runs_team_phase_created",
+            "team_id",
+            "phase_id",
+            "created_at",
+        ),
+        # Для проверки активных запусков
+        Index("ix_runs_team_status", "team_id", "status"),
+    )
 
 
 class Prediction(Base):
@@ -96,3 +123,10 @@ class RunCSV(Base):
     phase_id = Column(Integer, ForeignKey("phases.id", ondelete="CASCADE"), nullable=False)
     f1 = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        # Для получения последнего CSV-запуска на этапе
+        Index("ix_runs_csv_team_phase_created", "team_id", "phase_id", "created_at"),
+        # Для выбора лучшего CSV-запуска по f1 (и тай-брейк по created_at)
+        Index("ix_runs_csv_team_phase_f1_created", "team_id", "phase_id", "f1", "created_at"),
+    )

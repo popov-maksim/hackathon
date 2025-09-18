@@ -1,31 +1,28 @@
 import os
-import asyncio
-import logging
 import io
 import csv
-import json
+import logging
+import asyncio
+import aiofiles
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-import boto3
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import httpx
+import boto3
 from sqlalchemy import select, func
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 
-from common.db import get_session, async_engine
+from common.db import get_session, async_engine, AsyncSessionLocal
 from common.models import Base, Team, Phase, Run, RunCSV
 from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseOut,
                             StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem,
                             RunCSVStartOut, RunCSVStatusOut)
 from common.config import (
     DATASETS_DIR,
-    YMQ_ENDPOINT_URL,
-    YMQ_REGION,
-    YMQ_QUEUE_URL,
-    SQS_SEND_BATCH_MAX,
     S3_ENDPOINT_URL,
     S3_REGION,
     S3_OFFLINE_BUCKET,
@@ -34,8 +31,9 @@ from common.config import (
     S3_DATASETS_PREFIX,
     S3_RUNS_CSV_PREFIX,
     OFFLINE_CF_URL,
+    PREDICT_CF_URL,
 )
-from common.constants import RunStatus
+from common.constants import RunStatus, NULL_LAT_MS_RANK
 from common.utils import parse_annotation_literal
 
 
@@ -57,19 +55,6 @@ app.add_middleware(
 
 logger = logging.getLogger(__name__)
 
-def _sqs_client():
-    kwargs = {
-        "service_name": "sqs",
-        "endpoint_url": YMQ_ENDPOINT_URL,
-        "region_name": YMQ_REGION,
-    }
-    if ACCESS_KEY and SECRET_KEY:
-        kwargs.update({
-            "aws_access_key_id": ACCESS_KEY,
-            "aws_secret_access_key": SECRET_KEY,
-        })
-    return boto3.client(**kwargs)
-
 
 def _s3_client():
     if not S3_OFFLINE_BUCKET:
@@ -87,30 +72,24 @@ def _s3_client():
     return boto3.client(**kwargs)
 
 
-# Временный хардкод URL для HTTP-вызова predict_worker, минуя очередь
-PREDICT_CF_URL = "http://localhost:8081"  # замените на реальный публичный URL функции
-
-
 async def _build_run_items(phase: Phase) -> list[dict]:
-    """Асинхронно собирает элементы запуска из CSV (в thread-пуле)."""
+    """Асинхронно собирает элементы запуска из CSV."""
     dataset_path = f"{DATASETS_DIR}/{phase.dataset_filename}"
     if not os.path.exists(dataset_path):
         raise FileNotFoundError("Dataset file not found")
-    rows_limit = phase.n_csv_rows
 
-    def _read_sync() -> list[dict]:
-        items: list[dict] = []
-        with open(dataset_path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f, delimiter=";")
-            for idx, row in enumerate(reader):
-                if rows_limit is not None and idx >= rows_limit:
-                    break
-                sample = row.get("sample", "")
-                gold = parse_annotation_literal(row.get("annotation", ""))
-                items.append({"sample_idx": idx, "sample": sample, "gold": gold})
-        return items
+    items: list[dict] = []
+    async with aiofiles.open(dataset_path, newline="", encoding="utf-8-sig") as f:
+        content = await f.read()
+        reader = csv.DictReader(io.StringIO(content), delimiter=";")
+        for idx, row in enumerate(reader):
+            if phase.n_csv_rows is not None and idx >= phase.n_csv_rows:
+                break
+            sample = row.get("sample", "")
+            gold = parse_annotation_literal(row.get("annotation", ""))
+            items.append({"sample_idx": idx, "sample": sample, "gold": gold})
 
-    return await asyncio.to_thread(_read_sync)
+    return items
 
 
 @app.get("/health")
@@ -138,36 +117,93 @@ async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
 
 @app.post("/teams/register", response_model=TeamOut)
 async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_session)):
-    """Регистрация команды"""
-    query = select(Team).where(Team.tg_chat_id == payload.tg_chat_id)
-    result = await db.execute(query)
-    team = result.scalar_one_or_none()
+    """Регистрация команды с валидацией и проверкой уникальности имени."""
+    # Нормализация и базовая валидация данных
+    team_name = (payload.team_name or "").strip()
+    tg_username = (payload.tg_username or "").strip()
+    endpoint_url = str(payload.endpoint_url) if payload.endpoint_url is not None else None
+    github_url = str(payload.github_url) if payload.github_url is not None else None
 
-    if team is None:
-        team = Team(
-            tg_chat_id=payload.tg_chat_id,
-            name=payload.team_name,
-            tg_username=payload.tg_username,
-            endpoint_url=payload.endpoint_url,
-            github_url=payload.github_url,
-        )
-        db.add(team)
-        await db.commit()
-        await db.refresh(team)
-    else:
-        if payload.endpoint_url is not None:
-            team.endpoint_url = str(payload.endpoint_url)
-        if payload.github_url is not None:
-            team.github_url = str(payload.github_url)
-        await db.commit()
+    if not team_name or len(team_name) > 128:
+        raise HTTPException(status_code=422, detail="Некорректное имя команды (1-128 символов)")
+    if not tg_username or len(tg_username) > 128:
+        raise HTTPException(status_code=422, detail="Некорректный tg_username (1-128 символов)")
+    if endpoint_url is not None and len(endpoint_url) > 512:
+        raise HTTPException(status_code=422, detail="Слишком длинный endpoint_url (макс 512)")
+    if github_url is not None and len(github_url) > 512:
+        raise HTTPException(status_code=422, detail="Слишком длинный github_url (макс 512)")
 
-    return TeamOut(
-        team_id=team.id,
-        name=team.name,
-        tg_username=team.tg_username,
-        endpoint_url=team.endpoint_url,
-        github_url=team.github_url
+    logger.info(
+        "Register team request: tg_chat_id=%s, team_name=%s, tg_username=%s",
+        payload.tg_chat_id,
+        team_name,
+        tg_username,
     )
+
+    try:
+        # Ищем команду по tg_chat_id
+        query = select(Team).where(Team.tg_chat_id == payload.tg_chat_id)
+        result = await db.execute(query)
+        team = result.scalar_one_or_none()
+
+        # Проверка занятости имени другой командой
+        name_q = select(Team).where(Team.name == team_name)
+        name_res = await db.execute(name_q)
+        name_owner = name_res.scalar_one_or_none()
+        if name_owner is not None and (team is None or name_owner.id != team.id):
+            logger.warning("Team name already in use: %s", team_name)
+            raise HTTPException(status_code=409, detail="Имя команды уже занято")
+
+        if team is None:
+            # Создание новой команды
+            team = Team(
+                tg_chat_id=payload.tg_chat_id,
+                name=team_name,
+                tg_username=tg_username,
+                endpoint_url=endpoint_url,
+                github_url=github_url,
+            )
+            db.add(team)
+            await db.commit()
+            await db.refresh(team)
+            logger.info("Team created id=%s", team.id)
+        else:
+            changed_fields: list[str] = []
+            if endpoint_url is not None and team.endpoint_url != endpoint_url:
+                team.endpoint_url = endpoint_url
+                changed_fields.append("endpoint_url")
+            if github_url is not None and team.github_url != github_url:
+                team.github_url = github_url
+                changed_fields.append("github_url")
+
+            if changed_fields:
+                await db.commit()
+                logger.info("Team updated id=%s fields=%s", team.id, ",".join(changed_fields))
+            else:
+                logger.info("No changes for team id=%s", team.id)
+
+        return TeamOut(
+            team_id=team.id,
+            name=team.name,
+            tg_username=team.tg_username,
+            endpoint_url=team.endpoint_url,
+            github_url=team.github_url
+        )
+    except HTTPException:
+        await db.rollback()
+        raise
+    except IntegrityError:
+        await db.rollback()
+        logger.exception("Integrity error during team registration")
+        raise HTTPException(status_code=409, detail="Конфликт уникальности (tg_chat_id или name уже заняты)")
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception("Database error during team registration")
+        raise HTTPException(status_code=500, detail="Ошибка базы данных при регистрации команды")
+    except Exception:
+        await db.rollback()
+        logger.exception("Unexpected error during team registration")
+        raise HTTPException(status_code=500, detail="Ошибка при регистрации команды")
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
@@ -205,7 +241,20 @@ async def create_competition_phase(
                     break
                 f.write(chunk)
     except Exception as e:
+        if os.path.exists(full_path):
+            os.remove(full_path)
         raise HTTPException(status_code=500, detail=f"Не удалось сохранить файл: {e}")
+
+    try:
+        phase = Phase(name=name, dataset_filename=filename, n_csv_rows=n_csv_rows)
+        db.add(phase)
+        await db.commit()
+        await db.refresh(phase)
+    except Exception:
+        await db.rollback()
+        if os.path.exists(full_path):
+            os.remove(full_path)
+        raise HTTPException(status_code=500, detail="Ошибка при создании этапа в БД")
 
     try:
         if S3_OFFLINE_BUCKET:
@@ -215,10 +264,6 @@ async def create_competition_phase(
     except Exception:
         pass
 
-    phase = Phase(name=name, dataset_filename=filename, n_csv_rows=n_csv_rows)
-    db.add(phase)
-    await db.commit()
-    await db.refresh(phase)
     return CreatePhaseOut(
         phase_id=phase.id,
         name=phase.name,
@@ -277,77 +322,97 @@ async def upload_run_csv(
     if not OFFLINE_CF_URL:
         raise HTTPException(status_code=500, detail="OFFLINE_CF_URL is not configured")
 
-    team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
+    try:
+        # Блокируем команду для предотвращения race conditions
+        team_query = select(Team).where(Team.tg_chat_id == tg_chat_id).with_for_update()
+        team = (await db.execute(team_query)).scalar_one_or_none()
+        if team is None:
+            raise HTTPException(status_code=404, detail="Команда не найдена")
 
-    # Запрет параллельных запусков: нельзя запускать оффлайн, если
-    # уже есть активный онлайн-запуск или незавершённая оффлайн-оценка
-    active_run_query = (
-        select(Run)
-        .where(Run.team_id == team.id)
-        .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
-        .limit(1)
-    )
-    if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
-        raise HTTPException(status_code=409, detail="Нельзя запускать оффлайн-оценку во время активной онлайн-оценки")
-
-    last_csv = (
-        await db.execute(
-            select(RunCSV)
-            .where(RunCSV.team_id == team.id)
-            .order_by(RunCSV.created_at.desc())
+        # Проверяем активные запуски под блокировкой
+        active_run_query = (
+            select(Run)
+            .where(Run.team_id == team.id)
+            .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
             .limit(1)
         )
-    ).scalars().first()
-    if last_csv is not None and last_csv.f1 is None:
-        raise HTTPException(status_code=409, detail="У команды уже есть активная оффлайн-оценка")
+        if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
+            raise HTTPException(status_code=409, detail="Нельзя запускать оффлайн-оценку во время активной онлайн-оценки")
 
-    phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
-    if phase is None:
-        raise HTTPException(status_code=404, detail="Соревнование не стартовало")
+        # Проверяем активные CSV запуски
+        last_csv = (
+            await db.execute(
+                select(RunCSV)
+                .where(RunCSV.team_id == team.id)
+                .order_by(RunCSV.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if last_csv is not None and last_csv.f1 is None:
+            raise HTTPException(status_code=409, detail="У команды уже есть активная оффлайн-оценка")
 
-    try:
-        pred_bytes = await file.read()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}")
+        # Получаем текущий этап
+        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Соревнование не стартовало")
 
-    run_csv = RunCSV(team_id=team.id, phase_id=phase.id, f1=None)
-    db.add(run_csv)
-    await db.commit()
-    await db.refresh(run_csv)
-
-    s3 = _s3_client()
-    gold_key = f"{S3_DATASETS_PREFIX}{phase.dataset_filename}"
-    try:
-        s3.head_object(Bucket=S3_OFFLINE_BUCKET, Key=gold_key)
-    except Exception:
-        local_path = os.path.join(DATASETS_DIR, phase.dataset_filename)
-        if not os.path.exists(local_path):
-            raise HTTPException(status_code=404, detail="Файл датасета не найден для выгрузки в S3")
-        with open(local_path, "rb") as f:
-            s3.put_object(Bucket=S3_OFFLINE_BUCKET, Key=gold_key, Body=f.read(), ContentType="text/csv")
-
-    pred_key = f"{S3_RUNS_CSV_PREFIX}{run_csv.id}/predictions.csv"
-    s3.put_object(Bucket=S3_OFFLINE_BUCKET, Key=pred_key, Body=pred_bytes, ContentType="text/csv")
-
-    payload = {
-        "run_csv_id": run_csv.id,
-        "s3_bucket": S3_OFFLINE_BUCKET,
-        "s3_pred_key": pred_key,
-        "s3_gold_key": gold_key,
-    }
-    async def _invoke_offline_cf(data: dict):
+        # Читаем файл
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(OFFLINE_CF_URL, json=data)
-                resp.raise_for_status()
-        except Exception:
-            logger.exception("OFFLINE_CF invocation failed", extra={"run_csv_id": data.get("run_csv_id")})
+            pred_bytes = await file.read()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}")
 
-    # Запускаем вызов Cloud Function в фоне и сразу отвечаем пользователю
-    asyncio.create_task(_invoke_offline_cf(payload))
-    return RunCSVStartOut(run_csv_id=run_csv.id, status="queued")
+        # Создаем запись под блокировкой
+        run_csv = RunCSV(team_id=team.id, phase_id=phase.id, f1=None)
+        db.add(run_csv)
+        await db.commit()
+        await db.refresh(run_csv)
+
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Ошибка при создании оффлайн-оценки")
+
+    # Работа с S3 и вызов функции (вне транзакции)
+    try:
+        s3 = _s3_client()
+        gold_key = f"{S3_DATASETS_PREFIX}{phase.dataset_filename}"
+
+        # Загружаем предсказания
+        pred_key = f"{S3_RUNS_CSV_PREFIX}{run_csv.id}/predictions.csv"
+        s3.put_object(Bucket=S3_OFFLINE_BUCKET, Key=pred_key, Body=pred_bytes, ContentType="text/csv")
+
+        # Вызываем Cloud Function
+        payload = {
+            "run_csv_id": run_csv.id,
+            "s3_bucket": S3_OFFLINE_BUCKET,
+            "s3_pred_key": pred_key,
+            "s3_gold_key": gold_key,
+        }
+
+        async def _invoke_offline_cf(data: dict):
+            try:
+                async with httpx.AsyncClient(timeout=50.0) as client:
+                    resp = await client.post(OFFLINE_CF_URL, json=data)
+                    resp.raise_for_status()
+            except Exception:
+                logger.exception("OFFLINE_CF invocation failed", extra={"run_csv_id": data.get("run_csv_id")})
+
+        asyncio.create_task(_invoke_offline_cf(payload))
+        return RunCSVStartOut(run_csv_id=run_csv.id, status="queued")
+    except Exception as e:
+        # Если ошибка в S3/CF, помечаем запуск как неудачный
+        try:
+            async with AsyncSessionLocal() as cleanup_db:
+                cleanup_run = await cleanup_db.get(RunCSV, run_csv.id)
+                if cleanup_run:
+                    await cleanup_db.delete(cleanup_run)
+                    await cleanup_db.commit()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Ошибка при работе с S3: {e}")
 
 
 @app.get("/teams/{tg_chat_id}/last_csv", response_model=RunCSVStatusOut)
@@ -423,83 +488,115 @@ async def get_best_csv_status(
 
 @app.post("/runs/start", response_model=StartRunOut)
 async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)):
-    """Запустить оценку через Yandex Message Queue и Cloud Functions."""
-    team = (await db.execute(select(Team).where(Team.tg_chat_id == payload.tg_chat_id))).scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-    if team.endpoint_url is None:
-        raise HTTPException(status_code=400, detail="Не указан URL сервиса")
+    """Запустить оценку через Cloud Functions."""
+    try:
+        # Блокируем команду
+        team_query = select(Team).where(Team.tg_chat_id == payload.tg_chat_id).with_for_update()
+        team = (await db.execute(team_query)).scalar_one_or_none()
+        if team is None:
+            raise HTTPException(status_code=404, detail="Команда не найдена")
+        if team.endpoint_url is None:
+            raise HTTPException(status_code=400, detail="Не указан URL сервиса")
+        if not PREDICT_CF_URL:
+            raise HTTPException(status_code=500, detail="PREDICT_CF_URL is not configured")
 
-    active_run_query = (
-        select(Run)
-        .where(Run.team_id == team.id)
-        .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
-        .limit(1)
-    )
-    if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
-        raise HTTPException(status_code=409, detail="У команды уже есть активный запуск")
-
-    # Запрет параллельных запусков: нельзя запускать онлайн, если есть незавершённая оффлайн-оценка
-    last_csv = (
-        await db.execute(
-            select(RunCSV)
-            .where(RunCSV.team_id == team.id)
-            .order_by(RunCSV.created_at.desc())
+        # Проверяем активные запуски
+        active_run_query = (
+            select(Run)
+            .where(Run.team_id == team.id)
+            .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
             .limit(1)
         )
-    ).scalars().first()
-    if last_csv is not None and last_csv.f1 is None:
-        raise HTTPException(status_code=409, detail="Нельзя запускать онлайн-оценку во время активной оффлайн-оценки")
+        if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
+            raise HTTPException(status_code=409, detail="У команды уже есть активный запуск")
 
-    result = await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))
-    phase = result.scalars().first()
-    if phase is None:
-        raise HTTPException(status_code=404, detail="Соревнование не стартовало")
+        # Проверяем активные CSV запуски
+        last_csv = (
+            await db.execute(
+                select(RunCSV)
+                .where(RunCSV.team_id == team.id)
+                .order_by(RunCSV.created_at.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if last_csv is not None and last_csv.f1 is None:
+            raise HTTPException(status_code=409, detail="Нельзя запускать онлайн-оценку во время активной оффлайн-оценки")
 
-    run = Run(
-        team_id=team.id,
-        phase_id=phase.id,
-        status=RunStatus.RUNNING,
-        started_at=datetime.now(timezone.utc),
-        samples_total=0,
-        samples_processed=0,
-        samples_success=0,
-    )
-    db.add(run)
-    await db.commit()
-    await db.refresh(run)
+        # Получаем этап
+        result = await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))
+        phase = result.scalars().first()
+        if phase is None:
+            raise HTTPException(status_code=404, detail="Соревнование не стартовало")
 
+        # Создаем запуск
+        run = Run(
+            team_id=team.id,
+            phase_id=phase.id,
+            status=RunStatus.QUEUED,  # Начинаем с QUEUED
+            started_at=datetime.now(timezone.utc),
+            samples_total=0,
+            samples_processed=0,
+            samples_success=0,
+        )
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Ошибка при создании запуска")
+
+    # Подготовка данных и запуск CF (вне транзакции)
     try:
-        # Сформировать весь набор элементов заранее, чтобы записать samples_total до запуска CF
+        # Подготавливаем items
         items = await _build_run_items(phase)
 
-        # Фиксируем общее количество заранее — это требуется для корректной финализации в predict_worker
-        res = await db.execute(select(Run).where(Run.id == run.id))
-        r = res.scalar_one()
-        r.samples_total = len(items)
-        await db.commit()
+        # Обновляем количество samples и статус на RUNNING
+        async with AsyncSessionLocal() as update_db:
+            update_run = await update_db.get(Run, run.id)
+            if update_run:
+                update_run.samples_total = len(items)
+                update_run.status = RunStatus.RUNNING
+                await update_db.commit()
+
+        # Запускаем Cloud Function
+        async def _call_predict_cf_http(team: Team, run: Run, items: list[dict]) -> None:
+            try:
+                payload = {
+                    "run_id": run.id,
+                    "team_id": team.id,
+                    "endpoint_url": team.endpoint_url,
+                    "items": items,
+                }
+                async with httpx.AsyncClient(timeout=50.0) as client:
+                    resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
+                    resp.raise_for_status()
+            except Exception:
+                # При ошибке CF помечаем запуск как failed
+                async with AsyncSessionLocal() as error_db:
+                    error_run = await error_db.get(Run, run.id)
+                    if error_run:
+                        error_run.status = RunStatus.FAILED
+                        await error_db.commit()
+                logger.exception("PREDICT_CF invocation failed", extra={"run_id": run.id})
+
+        asyncio.create_task(_call_predict_cf_http(team, run, items))
+        return StartRunOut(run_id=run.id, status=RunStatus.RUNNING.value)
+
     except Exception as e:
-        pass
-        # res = await db.execute(select(Run).where(Run.id == run.id))
-        # r = res.scalar_one()
-        # r.status = RunStatus.QUEUED
-        # await db.commit()
-        # raise HTTPException(status_code=500, detail=f"Не удалось подготовить запуск: {e}")
-
-    async def _call_predict_cf_http(team: Team, run: Run, items: list[dict]) -> None:
-        payload = {
-            "run_id": run.id,
-            "team_id": team.id,
-            "endpoint_url": team.endpoint_url,
-            "items": items,
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
-
-    # Запускаем HTTP-вызов функции в фоне, не дожидаясь ответа
-    asyncio.create_task(_call_predict_cf_http(team, run, items))
-
-    return StartRunOut(run_id=run.id, status=run.status)
+        # При ошибке подготовки помечаем запуск как failed
+        try:
+            async with AsyncSessionLocal() as error_db:
+                error_run = await error_db.get(Run, run.id)
+                if error_run:
+                    error_run.status = RunStatus.FAILED
+                    await error_db.commit()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Не удалось подготовить запуск: {e}")
 
 
 @app.get("/runs/{run_id}/status", response_model=RunStatusOut)
@@ -584,7 +681,11 @@ async def leaderboard(phase_id: int | None = None, db: AsyncSession = Depends(ge
 
     rn = func.row_number().over(
         partition_by=Run.team_id,
-        order_by=(func.coalesce(Run.f1, 0.0).desc(), func.coalesce(Run.avg_latency_ms, 1e9).asc())
+        order_by=(
+            func.coalesce(Run.f1, 0.0).desc(),
+            func.coalesce(Run.avg_latency_ms, NULL_LAT_MS_RANK).asc(),
+            Run.id.asc(),
+        ),
     )
 
     subq = (
@@ -594,7 +695,11 @@ async def leaderboard(phase_id: int | None = None, db: AsyncSession = Depends(ge
             Run.avg_latency_ms.label("lat"),
             rn.label("rn"),
         )
-        .where(Run.phase_id == pid, Run.status == RunStatus.DONE)
+        .where(
+            Run.phase_id == pid,
+            Run.status == RunStatus.DONE,
+            Run.f1.isnot(None),
+        )
         .subquery()
     )
 
@@ -602,7 +707,11 @@ async def leaderboard(phase_id: int | None = None, db: AsyncSession = Depends(ge
         select(Team.name, subq.c.f1, subq.c.lat)
         .join(Team, Team.id == subq.c.team_id)
         .where(subq.c.rn == 1)
-        .order_by(func.coalesce(subq.c.f1, 0.0).desc(), func.coalesce(subq.c.lat, 1e9).asc(), Team.name.asc())
+        .order_by(
+            func.coalesce(subq.c.f1, 0.0).desc(),
+            func.coalesce(subq.c.lat, NULL_LAT_MS_RANK).asc(),
+            Team.name.asc(),
+        )
     )
     rows = res.all()
 
