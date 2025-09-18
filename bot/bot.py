@@ -8,6 +8,8 @@ import httpx
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.handler import CancelHandler
+from aiogram.dispatcher.middlewares import BaseMiddleware
 from aiogram.dispatcher.filters.state import State, StatesGroup
 
 
@@ -20,6 +22,35 @@ bot = Bot(token=BOT_TOKEN)
 dispatcher = Dispatcher(bot, storage=MemoryStorage())
 
 PROGRESS_WATCHERS: dict[int, asyncio.Task] = {}
+
+
+class GroupOnlyMiddleware(BaseMiddleware):
+    """Блокируем личные чаты: отвечаем подсказкой и останавливаем обработку."""
+
+    async def on_process_message(self, message: types.Message, data: dict):
+        try:
+            if message.chat.type == types.ChatType.PRIVATE:
+                await message.reply("Добавьте бота в чат команды")
+                raise CancelHandler()
+        except AttributeError:
+            pass
+
+    async def on_process_callback_query(self, callback_query: types.CallbackQuery, data: dict):
+        try:
+            chat = callback_query.message.chat if callback_query.message else None
+            if chat and chat.type == types.ChatType.PRIVATE:
+                # Закрываем лоадер у кнопки и шлём подсказку
+                try:
+                    await callback_query.answer()
+                except Exception:
+                    pass
+                await bot.send_message(chat.id, "Добавьте бота в чат команды")
+                raise CancelHandler()
+        except AttributeError:
+            pass
+
+# Регистрируем middleware, чтобы хэндлеры работали только в группах
+dispatcher.middleware.setup(GroupOnlyMiddleware())
 
 
 class BackendError(Exception):
