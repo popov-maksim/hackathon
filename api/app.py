@@ -156,9 +156,9 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         await db.refresh(team)
     else:
         if payload.endpoint_url is not None:
-            team.endpoint_url = payload.endpoint_url
+            team.endpoint_url = str(payload.endpoint_url)
         if payload.github_url is not None:
-            team.github_url = payload.github_url
+            team.github_url = str(payload.github_url)
         await db.commit()
 
     return TeamOut(
