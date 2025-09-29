@@ -20,7 +20,7 @@ from common.db import get_session, async_engine, AsyncSessionLocal
 from common.models import Base, Team, Phase, Run, RunCSV
 from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseOut,
                             StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem,
-                            RunCSVStartOut, RunCSVStatusOut)
+                            RunCSVStartOut, RunCSVStatusOut, TeamWithEndpointOut)
 from common.config import (
     DATASETS_DIR,
     S3_ENDPOINT_URL,
@@ -113,6 +113,26 @@ async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
         endpoint_url=team.endpoint_url,
         github_url=team.github_url
     )
+
+
+@app.get("/teams/with_endpoint", response_model=list[TeamWithEndpointOut])
+async def list_teams_with_endpoint(db: AsyncSession = Depends(get_session)):
+    """Список команд, у которых указан непустой endpoint_url."""
+    res = await db.execute(
+        select(Team)
+        .where(Team.endpoint_url.isnot(None))
+        .where(Team.endpoint_url != "")
+        .order_by(Team.id.asc())
+    )
+    teams = res.scalars().all()
+    return [
+        TeamWithEndpointOut(
+            tg_chat_id=t.tg_chat_id,
+            name=t.name,
+            endpoint_url=t.endpoint_url or "",
+        )
+        for t in teams
+    ]
 
 
 @app.post("/teams/register", response_model=TeamOut)

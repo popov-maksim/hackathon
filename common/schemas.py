@@ -50,6 +50,12 @@ class RunStatusOut(BaseModel):
     f1: float | None = None
 
 
+class TeamWithEndpointOut(BaseModel):
+    tg_chat_id: int
+    name: str
+    endpoint_url: str
+
+
 class LeaderboardItem(BaseModel):
     team_name: str
     avg_latency_ms: float | None = None

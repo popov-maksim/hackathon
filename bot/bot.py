@@ -172,18 +172,19 @@ def kb_registered() -> types.InlineKeyboardMarkup:
     btn_upload = types.InlineKeyboardButton(text="📤 Проверить offline-ответы", callback_data="upload_csv")
     btn_download = types.InlineKeyboardButton(text="📥 Скачать датасет", callback_data="download_dataset")
     btn_results = types.InlineKeyboardButton(text="📊 Результаты", callback_data="last_result")
-    btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд", callback_data="leaderboard")
+    btn_lb = types.InlineKeyboardButton(text="🏆 Лидерборд public", callback_data="leaderboard")
+    btn_final_lb = types.InlineKeyboardButton(text="🏆 Лидерборд private", callback_data="final_leaderboard")
     btn_change_url = types.InlineKeyboardButton(text="🔧 Установить URL сервиса", callback_data="change_endpoint")
     btn_change_github = types.InlineKeyboardButton(text="🔧 Установить GitHub ссылку", callback_data="change_github")
 
     # 1-й ряд: одна кнопка
-    kb.row(btn_run)
+    # kb.row(btn_run)
     # 2-й ряд: одна кнопка
-    kb.row(btn_upload)
+    # kb.row(btn_upload)
     # 3-й ряд: две кнопки
-    kb.row(btn_results, btn_lb)
+    kb.row(btn_final_lb, btn_lb)
     # 4-й ряд: две кнопки
-    kb.row(btn_change_url)
+    # kb.row(btn_change_url)
     # 5-й ряд: одна кнопка
     kb.row(btn_change_github)
     return kb
@@ -628,6 +629,36 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
     try:
+        # Public лидерборд всегда по phase_id=1
+        data = await api_get("/leaderboard?phase_id=1")
+        items = data.get("items", [])
+        if not items:
+            text = "Лидерборд пока пуст"
+        else:
+            lines = []
+            lines.append(f"{'#':>2}  {'Команда':<20}  {'F1':>6}  {'Latency, ms':>12}")
+            lines.append("-" * 46)
+            for idx, it in enumerate(items, start=1):
+                name = str(it.get('team_name', ''))[:20]
+                f1_val = it.get('f1', None)
+                lat_val = it.get('avg_latency_ms', None)
+                f1_str = '-' if f1_val is None else f"{float(f1_val):.4f}"
+                lat_str = '-' if lat_val is None else f"{float(lat_val):.1f}"
+                lines.append(f"{idx:>2}.  {name:<20}  {f1_str:>6}  {lat_str:>12}")
+            text = "```\n" + "\n".join(lines) + "\n```"
+        await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
+    except BackendError as e:
+        await bot.send_message(cid, f"Ошибка получения лидерборда: {e.message}", reply_markup=kb_registered())
+    except Exception:
+        await bot.send_message(cid, "Неожиданная ошибка при получении лидерборда", reply_markup=kb_registered())
+
+
+@dispatcher.callback_query_handler(lambda c: c.data == "final_leaderboard", state='*')
+async def cb_final_leaderboard(callback_query: types.CallbackQuery):
+    cid = callback_query.message.chat.id
+    await callback_query.answer()
+    try:
+        # Private лидерборд: по последнему (текущему) этапу
         data = await api_get("/leaderboard")
         items = data.get("items", [])
         if not items:

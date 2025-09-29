@@ -8,7 +8,7 @@ services:
       - ./datasets:/data/datasets:rw
       - ./common:/app/common:ro
     ports:
-      - "8000:8000"
+      - "8080:8000"
 
   bot:
     build: ./bot
