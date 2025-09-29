@@ -98,23 +98,6 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/teams/{tg_chat_id}", response_model=TeamOut)
-async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
-    """Получение команды по ID чата в телеграме"""
-    query = select(Team).where(Team.tg_chat_id == tg_chat_id)
-    result = await db.execute(query)
-    team = result.scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-    return TeamOut(
-        team_id=team.id,
-        name=team.name,
-        tg_username=team.tg_username,
-        endpoint_url=team.endpoint_url,
-        github_url=team.github_url
-    )
-
-
 @app.get("/teams/with_endpoint", response_model=list[TeamWithEndpointOut])
 async def list_teams_with_endpoint(db: AsyncSession = Depends(get_session)):
     """Список команд, у которых указан непустой endpoint_url."""
@@ -127,7 +110,7 @@ async def list_teams_with_endpoint(db: AsyncSession = Depends(get_session)):
     teams = res.scalars().all()
     return [
         TeamWithEndpointOut(
-            tg_chat_id=t.tg_chat_id,
+            tg_chat_id=int(t.tg_chat_id),
             name=t.name,
             endpoint_url=t.endpoint_url or "",
         )
@@ -224,6 +207,23 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         await db.rollback()
         logger.exception("Unexpected error during team registration")
         raise HTTPException(status_code=500, detail="Ошибка при регистрации команды")
+
+
+@app.get("/teams/{tg_chat_id}", response_model=TeamOut)
+async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
+    """Получение команды по ID чата в телеграме"""
+    query = select(Team).where(Team.tg_chat_id == tg_chat_id)
+    result = await db.execute(query)
+    team = result.scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Команда не найдена")
+    return TeamOut(
+        team_id=team.id,
+        name=team.name,
+        tg_username=team.tg_username,
+        endpoint_url=team.endpoint_url,
+        github_url=team.github_url
+    )
 
 
 @app.post("/admin/phases", response_model=CreatePhaseOut)
