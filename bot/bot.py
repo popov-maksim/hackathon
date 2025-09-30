@@ -308,7 +308,7 @@ async def cb_final_leaderboard(callback_query: types.CallbackQuery):
     await callback_query.answer()
     try:
         # Private лидерборд: по последнему (текущему) этапу
-        data = await api_get("/leaderboard?phase_id=1")
+        data = await api_get("/leaderboard?phase_id=2")
         items = data.get("items", [])
         if not items:
             text = "Лидерборд пока пуст"
