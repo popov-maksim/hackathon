@@ -591,7 +591,7 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
                     "endpoint_url": team.endpoint_url,
                     "items": items,
                 }
-                async with httpx.AsyncClient(timeout=50.0) as client:
+                async with httpx.AsyncClient(timeout=300.0) as client:
                     resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
                     resp.raise_for_status()
             except Exception:
