@@ -8,7 +8,7 @@ def nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 
-def normalize_pred(obj) -> List[Dict] | None:
+def normalize_pred(obj) -> List[Dict]:
     try:
         if isinstance(obj, dict):
             if "spans" in obj:
@@ -38,9 +38,9 @@ def normalize_pred(obj) -> List[Dict] | None:
                     out.append({"start": int(it[0]), "end": int(it[1]), "label": str(it[2])})
             return out
 
-        return None
+        return []
     except Exception:
-        return None
+        return []
 
 
 def parse_annotation_literal(s: str) -> List[Dict]:
