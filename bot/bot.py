@@ -277,11 +277,11 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
     try:
-        # Public лидерборд всегда по phase_id=1
         data = await api_get("/leaderboard?phase_id=1")
         items = data.get("items", [])
+        header = f"🏆 Лидерборд (public)"
         if not items:
-            text = "Лидерборд пока пуст"
+            text = f"{header}\nЛидерборд пока пуст"
         else:
             lines = []
             lines.append(f"{'#':>2}  {'Команда':<20}  {'F1':>6}  {'Latency, ms':>12}")
@@ -293,7 +293,7 @@ async def cb_leaderboard(callback_query: types.CallbackQuery):
                 f1_str = '-' if f1_val is None else f"{float(f1_val):.4f}"
                 lat_str = '-' if lat_val is None else f"{float(lat_val):.1f}"
                 lines.append(f"{idx:>2}.  {name:<20}  {f1_str:>6}  {lat_str:>12}")
-            text = "```\n" + "\n".join(lines) + "\n```"
+            text = header + "\n" + "```\n" + "\n".join(lines) + "\n```"
         await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
     except BackendError as e:
         await bot.send_message(cid, f"Ошибка получения лидерборда: {e.message}", reply_markup=kb_registered())
@@ -306,11 +306,11 @@ async def cb_final_leaderboard(callback_query: types.CallbackQuery):
     cid = callback_query.message.chat.id
     await callback_query.answer()
     try:
-        # Private лидерборд: по последнему (текущему) этапу
         data = await api_get("/leaderboard")
         items = data.get("items", [])
+        header = f"🏆 Лидерборд (private)"
         if not items:
-            text = "Лидерборд пока пуст"
+            text = f"{header}\nЛидерборд пока пуст"
         else:
             lines = []
             lines.append(f"{'#':>2}  {'Команда':<20}  {'F1':>6}  {'Latency, ms':>12}")
@@ -322,7 +322,7 @@ async def cb_final_leaderboard(callback_query: types.CallbackQuery):
                 f1_str = '-' if f1_val is None else f"{float(f1_val):.4f}"
                 lat_str = '-' if lat_val is None else f"{float(lat_val):.1f}"
                 lines.append(f"{idx:>2}.  {name:<20}  {f1_str:>6}  {lat_str:>12}")
-            text = "```\n" + "\n".join(lines) + "\n```"
+            text = header + "\n" + "```\n" + "\n".join(lines) + "\n```"
         await bot.send_message(cid, text, reply_markup=kb_registered(), parse_mode="Markdown")
     except BackendError as e:
         await bot.send_message(cid, f"Ошибка получения лидерборда: {e.message}", reply_markup=kb_registered())
