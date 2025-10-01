@@ -12,7 +12,6 @@ import boto3
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 
@@ -20,7 +19,7 @@ from common.db import get_session, async_engine, AsyncSessionLocal
 from common.models import Base, Team, Phase, Run, RunCSV
 from common.schemas import (RegisterTeamIn, TeamOut, CreatePhaseOut,
                             StartRunIn, StartRunOut, RunStatusOut, LeaderboardOut, LeaderboardItem,
-                            RunCSVStartOut, RunCSVStatusOut, TeamWithEndpointOut)
+                            TeamWithEndpointOut)
 from common.config import (
     DATASETS_DIR,
     S3_ENDPOINT_URL,
@@ -29,8 +28,6 @@ from common.config import (
     ACCESS_KEY,
     SECRET_KEY,
     S3_DATASETS_PREFIX,
-    S3_RUNS_CSV_PREFIX,
-    OFFLINE_CF_URL,
     PREDICT_CF_URL,
 )
 from common.constants import RunStatus, NULL_LAT_MS_RANK
@@ -209,23 +206,6 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=500, detail="Ошибка при регистрации команды")
 
 
-@app.get("/teams/{tg_chat_id}", response_model=TeamOut)
-async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
-    """Получение команды по ID чата в телеграме"""
-    query = select(Team).where(Team.tg_chat_id == tg_chat_id)
-    result = await db.execute(query)
-    team = result.scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-    return TeamOut(
-        team_id=team.id,
-        name=team.name,
-        tg_username=team.tg_username,
-        endpoint_url=team.endpoint_url,
-        github_url=team.github_url
-    )
-
-
 @app.post("/admin/phases", response_model=CreatePhaseOut)
 async def create_competition_phase(
     name: str = Form(...),
@@ -290,220 +270,6 @@ async def create_competition_phase(
         dataset_filename=phase.dataset_filename,
         n_csv_rows=phase.n_csv_rows,
     )
-
-
-@app.get("/phases/current/dataset")
-async def download_current_phase_dataset(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
-    team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-
-    result = await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))
-    phase = result.scalars().first()
-    if phase is None:
-        raise HTTPException(status_code=404, detail="Нет текущего этапа")
-
-    full_path = f"{DATASETS_DIR}/{phase.dataset_filename}"
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="Файл датасета не найден")
-
-    base_name, _ = os.path.splitext(phase.dataset_filename)
-    out_name = f"{base_name}_samples.csv"
-
-    def iter_csv():
-        buf = io.StringIO()
-        writer = csv.writer(buf, delimiter=";")
-        writer.writerow(["sample"])
-        yield buf.getvalue().encode("utf-8")
-        buf.seek(0)
-        buf.truncate(0)
-
-        with open(full_path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f, delimiter=";")
-            for row in reader:
-                writer.writerow([row.get("sample", "")])
-                yield buf.getvalue().encode("utf-8")
-                buf.seek(0)
-                buf.truncate(0)
-
-    headers = {"Content-Disposition": f'attachment; filename="{out_name}"'}
-    return StreamingResponse(iter_csv(), media_type="text/csv", headers=headers)
-
-
-@app.post("/runs_csv/upload", response_model=RunCSVStartOut)
-async def upload_run_csv(
-    tg_chat_id: int = Form(...),
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_session),
-):
-    """Загрузить CSV предсказаний в S3 и вызвать функцию оценки через Cloud Functions."""
-    if not S3_OFFLINE_BUCKET:
-        raise HTTPException(status_code=500, detail="S3 bucket is not configured")
-    if not OFFLINE_CF_URL:
-        raise HTTPException(status_code=500, detail="OFFLINE_CF_URL is not configured")
-
-    try:
-        # Блокируем команду для предотвращения race conditions
-        team_query = select(Team).where(Team.tg_chat_id == tg_chat_id).with_for_update()
-        team = (await db.execute(team_query)).scalar_one_or_none()
-        if team is None:
-            raise HTTPException(status_code=404, detail="Команда не найдена")
-
-        # Проверяем активные запуски под блокировкой
-        active_run_query = (
-            select(Run)
-            .where(Run.team_id == team.id)
-            .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
-            .limit(1)
-        )
-        if (await db.execute(active_run_query)).scalar_one_or_none() is not None:
-            raise HTTPException(status_code=409, detail="Нельзя запускать оффлайн-оценку во время активной онлайн-оценки")
-
-        # Проверяем активные CSV запуски
-        last_csv = (
-            await db.execute(
-                select(RunCSV)
-                .where(RunCSV.team_id == team.id)
-                .order_by(RunCSV.created_at.desc())
-                .limit(1)
-            )
-        ).scalars().first()
-        if last_csv is not None and last_csv.f1 is None:
-            raise HTTPException(status_code=409, detail="У команды уже есть активная оффлайн-оценка")
-
-        # Получаем текущий этап
-        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Соревнование не стартовало")
-
-        # Читаем файл
-        try:
-            pred_bytes = await file.read()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}")
-
-        # Создаем запись под блокировкой
-        run_csv = RunCSV(team_id=team.id, phase_id=phase.id, f1=None)
-        db.add(run_csv)
-        await db.commit()
-        await db.refresh(run_csv)
-
-    except HTTPException:
-        await db.rollback()
-        raise
-    except Exception:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail="Ошибка при создании оффлайн-оценки")
-
-    # Работа с S3 и вызов функции (вне транзакции)
-    try:
-        s3 = _s3_client()
-        gold_key = f"{S3_DATASETS_PREFIX}{phase.dataset_filename}"
-
-        # Загружаем предсказания
-        pred_key = f"{S3_RUNS_CSV_PREFIX}{run_csv.id}/predictions.csv"
-        s3.put_object(Bucket=S3_OFFLINE_BUCKET, Key=pred_key, Body=pred_bytes, ContentType="text/csv")
-
-        # Вызываем Cloud Function
-        payload = {
-            "run_csv_id": run_csv.id,
-            "s3_bucket": S3_OFFLINE_BUCKET,
-            "s3_pred_key": pred_key,
-            "s3_gold_key": gold_key,
-        }
-
-        async def _invoke_offline_cf(data: dict):
-            try:
-                async with httpx.AsyncClient(timeout=50.0) as client:
-                    resp = await client.post(OFFLINE_CF_URL, json=data)
-                    resp.raise_for_status()
-            except Exception:
-                logger.exception("OFFLINE_CF invocation failed", extra={"run_csv_id": data.get("run_csv_id")})
-
-        asyncio.create_task(_invoke_offline_cf(payload))
-        return RunCSVStartOut(run_csv_id=run_csv.id, status="queued")
-    except Exception as e:
-        # Если ошибка в S3/CF, помечаем запуск как неудачный
-        try:
-            async with AsyncSessionLocal() as cleanup_db:
-                cleanup_run = await cleanup_db.get(RunCSV, run_csv.id)
-                if cleanup_run:
-                    await cleanup_db.delete(cleanup_run)
-                    await cleanup_db.commit()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Ошибка при работе с S3: {e}")
-
-
-@app.get("/teams/{tg_chat_id}/last_csv", response_model=RunCSVStatusOut)
-async def get_last_csv_status(
-    tg_chat_id: int,
-    phase_id: int | None = None,
-    db: AsyncSession = Depends(get_session),
-):
-    team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-
-    # Определяем этап: указанный или последний созданный
-    if phase_id is None:
-        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Нет этапов")
-        pid = phase.id
-    else:
-        phase = (await db.execute(select(Phase).where(Phase.id == phase_id))).scalar_one_or_none()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Этап не найден")
-        pid = phase.id
-
-    last = (
-        await db.execute(
-            select(RunCSV)
-            .where(RunCSV.team_id == team.id, RunCSV.phase_id == pid)
-            .order_by(RunCSV.created_at.desc())
-            .limit(1)
-        )
-    ).scalars().first()
-    if last is None:
-        raise HTTPException(status_code=404, detail="Нет оффлайн-оценок для команды на этом этапе")
-    status = "done" if last.f1 is not None else "running"
-    return RunCSVStatusOut(run_csv_id=last.id, status=status, f1=last.f1)
-
-
-@app.get("/teams/{tg_chat_id}/best_csv", response_model=RunCSVStatusOut)
-async def get_best_csv_status(
-    tg_chat_id: int,
-    phase_id: int | None = None,
-    db: AsyncSession = Depends(get_session),
-):
-    """Лучший оффлайн-результат команды (по максимальному F1)."""
-    team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-    # Определяем этап: указанный или последний
-    if phase_id is None:
-        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Нет этапов")
-        pid = phase.id
-    else:
-        phase = (await db.execute(select(Phase).where(Phase.id == phase_id))).scalar_one_or_none()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Этап не найден")
-        pid = phase.id
-
-    best = (
-        await db.execute(
-            select(RunCSV)
-            .where(RunCSV.team_id == team.id, RunCSV.phase_id == pid, RunCSV.f1.isnot(None))
-            .order_by(RunCSV.f1.desc(), RunCSV.created_at.asc())
-            .limit(1)
-        )
-    ).scalars().first()
-    if best is None:
-        raise HTTPException(status_code=404, detail="Нет завершённых оффлайн-оценок для команды на этом этапе")
-    return RunCSVStatusOut(run_csv_id=best.id, status="done", f1=best.f1)
 
 
 @app.post("/runs/start", response_model=StartRunOut)
@@ -591,7 +357,7 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
                     "endpoint_url": team.endpoint_url,
                     "items": items,
                 }
-                async with httpx.AsyncClient(timeout=400.0) as client:
+                async with httpx.AsyncClient(timeout=450.0) as client:
                     resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
                     resp.raise_for_status()
             except Exception:
@@ -633,50 +399,6 @@ async def run_status(run_id: int, db: AsyncSession = Depends(get_session)):
         samples_total=run.samples_total,
         avg_latency_ms=run.avg_latency_ms,
         f1=run.f1,
-    )
-
-
-@app.get("/teams/{tg_chat_id}/last_run", response_model=RunStatusOut)
-async def get_last_run_status(
-    tg_chat_id: int,
-    phase_id: int | None = None,
-    db: AsyncSession = Depends(get_session),
-):
-    """Получение статуса последнего запуска командой"""
-    team = (await db.execute(select(Team).where(Team.tg_chat_id == tg_chat_id))).scalar_one_or_none()
-    if team is None:
-        raise HTTPException(status_code=404, detail="Команда не найдена")
-
-    # Определяем этап: указанный или последний
-    if phase_id is None:
-        phase = (await db.execute(select(Phase).order_by(Phase.created_at.desc()).limit(1))).scalars().first()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Нет этапов")
-        pid = phase.id
-    else:
-        phase = (await db.execute(select(Phase).where(Phase.id == phase_id))).scalar_one_or_none()
-        if phase is None:
-            raise HTTPException(status_code=404, detail="Этап не найден")
-        pid = phase.id
-
-    last_run_query = (
-        select(Run)
-        .where(Run.team_id == team.id, Run.phase_id == pid)
-        .order_by(Run.created_at.desc())
-        .limit(1)
-    )
-    last_run = (await db.execute(last_run_query)).scalars().first()
-    if last_run is None:
-        raise HTTPException(status_code=404, detail="У данной команды ещё не было запусков на этом этапе")
-
-    return RunStatusOut(
-        run_id=last_run.id,
-        status=last_run.status,
-        samples_processed=last_run.samples_processed,
-        samples_success=last_run.samples_success,
-        samples_total=last_run.samples_total,
-        avg_latency_ms=last_run.avg_latency_ms,
-        f1=last_run.f1,
     )
 
 

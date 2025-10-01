@@ -1,4 +1,3 @@
-import io
 import os
 import html
 import logging
