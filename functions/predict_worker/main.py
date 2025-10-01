@@ -136,13 +136,18 @@ async def _run(run_id: int, messages: list[dict[str, str]]):
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for ((is_passed, latency, response_body), msg) in zip(results, current_messages):
+                try:
+                    res = json.loads(response_body)
+                except Exception:
+                    is_passed = False
+                    res = []
                 data_to_save.append({
                     "run_id": run_id,
                     "sample_idx": int(msg["sample_idx"]),
                     "latency_ms": latency if is_passed else None,
                     "ok": is_passed,
                     "gold_json": msg.get("gold", []),
-                    "pred_json": normalize_pred(json.loads(response_body)) if is_passed and response_body else [],
+                    "pred_json": normalize_pred(res) if is_passed and response_body else [],
                 })
 
             logger.info("done handling group")

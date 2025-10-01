@@ -357,16 +357,18 @@ async def start_run(payload: StartRunIn, db: AsyncSession = Depends(get_session)
                     "endpoint_url": team.endpoint_url,
                     "items": items,
                 }
-                async with httpx.AsyncClient(timeout=450.0) as client:
+                # Держим соединение с Cloud Function до завершения без клиентского таймаута,
+                # чтобы функция не была прервана из‑за нашего разрыва соединения.
+                async with httpx.AsyncClient(timeout=600) as client:
                     resp = await client.post(PREDICT_CF_URL.rstrip("/"), json=payload)
                     resp.raise_for_status()
             except Exception:
                 # При ошибке CF помечаем запуск как failed
-                async with AsyncSessionLocal() as error_db:
-                    error_run = await error_db.get(Run, run.id)
-                    if error_run:
-                        error_run.status = RunStatus.FAILED
-                        await error_db.commit()
+                # async with AsyncSessionLocal() as error_db:
+                #     error_run = await error_db.get(Run, run.id)
+                #     if error_run:
+                #         error_run.status = RunStatus.FAILED
+                #         await error_db.commit()
                 logger.exception("PREDICT_CF invocation failed", extra={"run_id": run.id})
 
         asyncio.create_task(_call_predict_cf_http(team, run, items))
