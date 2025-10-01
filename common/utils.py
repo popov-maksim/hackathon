@@ -73,9 +73,6 @@ def f1_macro(samples: List[Tuple[List[Dict], List[Dict]]]) -> float:
     fn_per_type = defaultdict(int)
 
     for gold, pred in samples:
-        if pred is None:
-            continue
-
         gold_by_type = defaultdict(set)
         pred_by_type = defaultdict(set)
 

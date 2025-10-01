@@ -125,7 +125,7 @@ async def _run(run_id: int, messages: list[dict[str, str]]):
             end_index = start_index + CONCURRENCY
             current_messages = messages[start_index: end_index]
 
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as aiohttp_client:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as aiohttp_client:
                 tasks = [
                     make_request(
                         aiohttp_client,
@@ -142,7 +142,7 @@ async def _run(run_id: int, messages: list[dict[str, str]]):
                     "latency_ms": latency if is_passed else None,
                     "ok": is_passed,
                     "gold_json": msg.get("gold", []),
-                    "pred_json": normalize_pred(json.loads(response_body)) if is_passed and response_body else None,
+                    "pred_json": normalize_pred(json.loads(response_body)) if is_passed and response_body else [],
                 })
 
             logger.info("done handling group")
