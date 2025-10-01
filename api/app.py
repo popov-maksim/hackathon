@@ -206,6 +206,23 @@ async def register_team(payload: RegisterTeamIn, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=500, detail="Ошибка при регистрации команды")
 
 
+@app.get("/teams/{tg_chat_id}", response_model=TeamOut)
+async def get_team(tg_chat_id: int, db: AsyncSession = Depends(get_session)):
+    """Получение команды по ID чата в телеграме"""
+    query = select(Team).where(Team.tg_chat_id == tg_chat_id)
+    result = await db.execute(query)
+    team = result.scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Команда не найдена")
+    return TeamOut(
+        team_id=team.id,
+        name=team.name,
+        tg_username=team.tg_username,
+        endpoint_url=team.endpoint_url,
+        github_url=team.github_url
+    )
+
+
 @app.post("/admin/phases", response_model=CreatePhaseOut)
 async def create_competition_phase(
     name: str = Form(...),
